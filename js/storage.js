@@ -12,12 +12,12 @@ function openDb() {
   });
 }
 
-export async function rememberVault(handle) {
+async function rememberHandle(key, handle) {
   try {
     const db = await openDb();
     await new Promise((resolve, reject) => {
       const tx = db.transaction(DB_STORE, 'readwrite');
-      tx.objectStore(DB_STORE).put(handle, 'last-vault');
+      tx.objectStore(DB_STORE).put(handle, key);
       tx.oncomplete = resolve;
       tx.onerror = () => reject(tx.error);
     });
@@ -27,11 +27,11 @@ export async function rememberVault(handle) {
   }
 }
 
-export async function recalledVault() {
+async function recalledHandle(key) {
   try {
     const db = await openDb();
     const handle = await new Promise((resolve, reject) => {
-      const req = db.transaction(DB_STORE).objectStore(DB_STORE).get('last-vault');
+      const req = db.transaction(DB_STORE).objectStore(DB_STORE).get(key);
       req.onsuccess = () => resolve(req.result || null);
       req.onerror = () => reject(req.error);
     });
@@ -41,6 +41,11 @@ export async function recalledVault() {
     return null;
   }
 }
+
+export const rememberVault = handle => rememberHandle('last-vault', handle);
+export const recalledVault = () => recalledHandle('last-vault');
+export const rememberSettingsFolder = handle => rememberHandle('settings-folder', handle);
+export const recalledSettingsFolder = () => recalledHandle('settings-folder');
 
 export function safeName(value, extension = '') {
   let name = String(value || '').trim().replace(/[\\/:*?"<>|]/g, '-').replace(/[. ]+$/g, '');

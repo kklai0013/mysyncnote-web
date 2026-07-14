@@ -1,13 +1,18 @@
-import { Vault, rememberVault, recalledVault, safeName, dirname, basename } from './storage.js';
+import { Vault, rememberVault, recalledVault, rememberSettingsFolder, recalledSettingsFolder, safeName, dirname, basename } from './storage.js';
 import { renderMarkdown, extractHeadings, extractTags, extractLinks, buildIndex, noteStem, replaceWikiTarget, parseFrontmatter } from './markdown.js';
 import { GraphView } from './graph.js';
 import { CanvasView } from './canvas.js';
 
 const $ = id => document.getElementById(id);
 const app = $('app');
-const settings = Object.assign({ attachmentFolder: 'attachments', trashMode: 'trash', updateLinks: true, autoSave: true }, JSON.parse(localStorage.getItem('mysyncnote-preferences') || '{}'));
+const DEFAULT_SHORTCUTS = { save: 'Ctrl+S', command: 'Ctrl+P', search: 'Ctrl+K', newNote: 'Ctrl+N', graph: 'Ctrl+G', rename: 'F2', toggleLeft: 'Ctrl+B', split: 'Ctrl+\\' };
+const SHORTCUT_LABELS = { save: '立即儲存', command: '命令面板', search: '搜尋筆記庫', newNote: '新增筆記', graph: '顯示／關閉關聯圖譜', rename: '重新命名選取項目', toggleLeft: '顯示／收起左側欄', split: '將目前筆記分割到新窗格' };
+const settings = Object.assign({ attachmentFolder: 'attachments', defaultFolder: '', trashMode: 'trash', updateLinks: true, autoSave: true, settingsFileName: 'mysyncnote-settings.json', shortcuts: { ...DEFAULT_SHORTCUTS } }, JSON.parse(localStorage.getItem('mysyncnote-preferences') || '{}'));
+settings.shortcuts = { ...DEFAULT_SHORTCUTS, ...(settings.shortcuts || {}) };
+for (const key of Object.keys(DEFAULT_SHORTCUTS)) if (typeof settings.shortcuts[key] !== 'string') settings.shortcuts[key] = '';
 let vault = null;
 let rememberedHandle = null;
+let settingsFolderHandle = null;
 let index = null;
 let selectedPath = '';
 let currentPath = '';
@@ -20,7 +25,10 @@ let indexingTimer = null;
 let rightPanel = 'outline';
 let viewMode = localStorage.getItem('mysyncnote-view') || 'edit';
 let currentView = 'welcome';
+let graphDocked = false;
 let tabs = JSON.parse(sessionStorage.getItem('mysyncnote-tabs') || '[]');
+let secondaryPanePaths = JSON.parse(sessionStorage.getItem('mysyncnote-secondary-panes') || '[]');
+const secondaryPanes = new Map();
 let history = [];
 let historyIndex = -1;
 let objectUrls = [];
@@ -29,6 +37,55 @@ const expanded = new Set(JSON.parse(localStorage.getItem('mysyncnote-expanded') 
 function persistSettings() {
   localStorage.setItem('mysyncnote-preferences', JSON.stringify(settings));
   localStorage.setItem('mysyncnote-expanded', JSON.stringify([...expanded]));
+  scheduleSettingsFileWrite();
+}
+
+let settingsWriteTimer = null;
+function scheduleSettingsFileWrite() {
+  clearTimeout(settingsWriteTimer);
+  if (settingsFolderHandle) settingsWriteTimer = setTimeout(writeSettingsFile, 350);
+}
+
+async function writeSettingsFile() {
+  if (!settingsFolderHandle) return;
+  try {
+    if (await settingsFolderHandle.queryPermission({ mode: 'readwrite' }) !== 'granted') return;
+    const name = safeName(settings.settingsFileName || 'mysyncnote-settings.json', '.json');
+    const file = await settingsFolderHandle.getFileHandle(name, { create: true });
+    const writer = await file.createWritable();
+    await writer.write(JSON.stringify({ version: 1, ...settings }, null, 2));
+    await writer.close();
+    $('settingsFileLocation').textContent = `${settingsFolderHandle.name}/${name}`;
+  } catch (error) { toast(`設定檔無法儲存：${error.message}`, true); }
+}
+
+async function loadSettingsFile(handle) {
+  try {
+    if (await handle.queryPermission({ mode: 'readwrite' }) !== 'granted') return false;
+    const name = safeName(settings.settingsFileName || 'mysyncnote-settings.json', '.json');
+    const fileHandle = await handle.getFileHandle(name);
+    const incoming = JSON.parse(await (await fileHandle.getFile()).text());
+    Object.assign(settings, incoming, { shortcuts: { ...DEFAULT_SHORTCUTS, ...(incoming.shortcuts || {}) } });
+    for (const key of Object.keys(DEFAULT_SHORTCUTS)) if (typeof settings.shortcuts[key] !== 'string') settings.shortcuts[key] = '';
+    localStorage.setItem('mysyncnote-preferences', JSON.stringify(settings));
+    settingsFolderHandle = handle;
+    $('settingsFileLocation').textContent = `${handle.name}/${name}`;
+    return true;
+  } catch (error) {
+    if (error.name !== 'NotFoundError') console.warn('設定檔讀取失敗', error);
+    return false;
+  }
+}
+
+async function chooseSettingsFolder() {
+  if (!window.showDirectoryPicker) return toast('這個瀏覽器不能選擇設定檔資料夾', true);
+  try {
+    const handle = await showDirectoryPicker({ mode: 'readwrite' });
+    settingsFolderHandle = handle;
+    await rememberSettingsFolder(handle);
+    await writeSettingsFile();
+    toast(`設定檔會儲存在「${handle.name}」`);
+  } catch (error) { if (error.name !== 'AbortError') toast(error.message, true); }
 }
 
 function toast(message, error = false) {
@@ -46,11 +103,17 @@ function setSaveState(text, error = false) {
 }
 
 function showView(name) {
+  if (name === 'graph') {
+    graphDocked = true;
+    name = currentType === 'canvas' ? 'canvas' : currentPath ? 'note' : 'graph';
+  }
   currentView = name;
-  $('welcome').classList.toggle('hidden', name !== 'welcome');
+  const workspaceVisible = name !== 'welcome' || graphDocked || secondaryPanes.size > 0;
+  $('welcome').classList.toggle('hidden', workspaceVisible);
+  $('workspaceDock').classList.toggle('hidden', !workspaceVisible);
   $('noteWorkspace').classList.toggle('hidden', name !== 'note');
-  $('graphWorkspace').classList.toggle('hidden', name !== 'graph');
   $('canvasWorkspace').classList.toggle('hidden', name !== 'canvas');
+  $('graphWorkspace').classList.toggle('hidden', !graphDocked);
 }
 
 function hideMobilePanels() {
@@ -132,7 +195,7 @@ async function openVaultPicker() {
 }
 
 async function loadVault(handle) {
-  if (dirty) await saveCurrent();
+  if (dirty || [...secondaryPanes.values()].some(pane => pane.dirty)) await saveAllPanes();
   vault = new Vault(handle);
   if (await vault.permission(true) !== 'granted') throw new Error('沒有筆記庫的讀寫權限');
   $('vaultState').textContent = '正在讀取…';
@@ -143,16 +206,23 @@ async function loadVault(handle) {
   $('settingsVault').textContent = vault.name;
   localStorage.setItem('mysyncnote-vault-name', vault.name);
   await rebuildIndex();
+  const defaultPath = settings.defaultFolder.trim().replace(/\\/g, '/').replace(/^\/|\/$/g, '');
+  if (defaultPath && vault.node(defaultPath)?.kind === 'directory') {
+    selectedPath = defaultPath;
+    for (let path = defaultPath; path; path = dirname(path)) expanded.add(path);
+  } else selectedPath = '';
   renderTree();
   if (tabs.length) {
     tabs = tabs.filter(path => vault.node(path));
     if (tabs.length) await openPath(tabs[0], false);
     else showView('welcome');
   } else {
-    const first = vault.markdownNodes()[0] || vault.canvasNodes()[0];
+    const candidates = [...vault.markdownNodes(), ...vault.canvasNodes()];
+    const first = candidates.find(node => !defaultPath || node.path.startsWith(`${defaultPath}/`)) || candidates[0];
     if (first) await openPath(first.path);
     else showView('welcome');
   }
+  await restoreSecondaryPanes();
   renderTabs();
   toast(`已開啟筆記庫「${vault.name}」`);
 }
@@ -253,7 +323,7 @@ function showNodeMenu(node, x, y) {
   );
   else items.push({ label: '開啟', action: () => openPath(node.path) }, 'separator');
   items.push(
-    { label: '重新命名', shortcut: 'F2', action: () => renamePath(node.path) },
+    { label: '重新命名', shortcut: settings.shortcuts.rename, action: () => renamePath(node.path) },
     { label: '移動到…', action: () => chooseMoveDestination(node.path) },
     { label: '在檔案總管中顯示', action: () => { expanded.add(node.parentPath); selectedPath = node.path; renderTree(); } },
     'separator', { label: '刪除', shortcut: 'Delete', danger: true, action: () => deletePath(node.path) }
@@ -292,7 +362,7 @@ async function renamePath(path, explicitName = null) {
   const node = vault.node(path); if (!node) return;
   const extension = node.kind === 'file' ? `.${node.ext}` : '';
   const initial = node.kind === 'file' ? node.name.slice(0, -extension.length) : node.name;
-  const value = explicitName ?? await ask(`重新命名${node.kind === 'directory' ? '資料夾' : '檔案'}`, initial, 'F2 只是快捷鍵；平常可用右鍵、長按或直接修改筆記標題。');
+  const value = explicitName ?? await ask(`重新命名${node.kind === 'directory' ? '資料夾' : '檔案'}`, initial, `${settings.shortcuts.rename || '快捷鍵未設定'} 只是快捷鍵；平常可用右鍵、長按或直接修改筆記標題。`);
   if (!value || safeName(value, extension) === node.name) return;
   const oldStem = noteStem(node.name), newName = safeName(value, extension), newStem = noteStem(newName);
   try {
@@ -300,6 +370,7 @@ async function renamePath(path, explicitName = null) {
     const target = await vault.rename(path, newName);
     if (node.kind === 'file' && node.ext === 'md' && settings.updateLinks) await updateLinksAfterRename(oldStem, newStem);
     tabs = tabs.map(tab => tab === path ? target : tab.startsWith(`${path}/`) ? `${target}${tab.slice(path.length)}` : tab);
+    remapSecondaryPath(path, target);
     if (currentPath === path || currentPath.startsWith(`${path}/`)) currentPath = `${target}${currentPath.slice(path.length)}`;
     selectedPath = target;
     await rebuildIndex(); renderTree(); renderTabs();
@@ -328,6 +399,7 @@ async function movePath(path, destination) {
     if (path === currentPath && dirty) await saveCurrent();
     const target = await vault.move(path, destination);
     tabs = tabs.map(tab => tab === path ? target : tab.startsWith(`${path}/`) ? `${target}${tab.slice(path.length)}` : tab);
+    remapSecondaryPath(path, target);
     if (currentPath === path || currentPath.startsWith(`${path}/`)) currentPath = `${target}${currentPath.slice(path.length)}`;
     selectedPath = target; expanded.add(destination); await rebuildIndex(); renderTree(); renderTabs(); toast(`已移動到「${destination || vault.name}」`);
   } catch (error) { toast(error.message, true); }
@@ -338,6 +410,7 @@ async function deletePath(path) {
   if (!await confirmAction(`刪除「${node.name}」？`, settings.trashMode === 'trash' ? '項目會移到筆記庫的 .trash 資料夾。' : '這會直接永久刪除，無法復原。', '刪除')) return;
   try {
     await vault.remove(path, settings.trashMode === 'trash');
+    for (const panePath of [...secondaryPanes.keys()]) if (panePath === path || panePath.startsWith(`${path}/`)) await closeSecondaryPane(panePath, false);
     tabs = tabs.filter(tab => tab !== path && !tab.startsWith(`${path}/`));
     if (currentPath === path || currentPath.startsWith(`${path}/`)) { currentPath = ''; currentType = ''; showView('welcome'); }
     selectedPath = ''; await rebuildIndex(); renderTree(); renderTabs(); toast('已刪除');
@@ -369,11 +442,111 @@ function renderTabs() {
     if (!vault?.node(path)) continue;
     const tab = document.createElement('button'); tab.className = `tab${path === currentPath ? ' active' : ''}`; tab.role = 'tab';
     const icon = vault.node(path)?.ext === 'canvas' ? '◇' : '▤';
+    tab.draggable = true;
     tab.innerHTML = `<span>${icon}</span><span class="tab-label"></span><span class="tab-close">×</span>`;
     tab.querySelector('.tab-label').textContent = basename(path).replace(/\.(md|canvas)$/i, '');
     tab.onclick = event => { if (event.target.closest('.tab-close')) closeTab(path); else openPath(path); };
+    tab.ondragstart = event => { event.dataTransfer.setData('text/mysyncnote-path', path); event.dataTransfer.effectAllowed = 'copyMove'; };
+    tab.ondragover = event => { if ([...event.dataTransfer.types].includes('text/mysyncnote-path')) event.preventDefault(); };
+    tab.ondrop = event => {
+      const source = event.dataTransfer.getData('text/mysyncnote-path'); if (!source || source === path || !tabs.includes(source)) return;
+      event.preventDefault(); event.stopPropagation();
+      tabs = tabs.filter(item => item !== source); const targetIndex = tabs.indexOf(path); tabs.splice(targetIndex, 0, source);
+      sessionStorage.setItem('mysyncnote-tabs', JSON.stringify(tabs)); renderTabs();
+    };
     container.append(tab);
   }
+}
+
+async function addSecondaryPane(path, insertBefore = null) {
+  if (!vault || vault.node(path)?.ext !== 'md') return toast('只有 Markdown 筆記可以加入筆記窗格', true);
+  if (secondaryPanes.has(path)) {
+    secondaryPanes.get(path).element.scrollIntoView({ behavior: 'smooth', inline: 'center' });
+    return;
+  }
+  const node = vault.node(path);
+  const content = await vault.readText(path, true);
+  const pane = { path, modified: node.lastModified, dirty: false, timer: null, mode: 'edit', objectUrls: [] };
+  const element = document.createElement('section');
+  element.className = 'dock-pane secondary-note-pane'; element.dataset.path = path;
+  element.innerHTML = `<header class="secondary-pane-header" draggable="true"><span class="tree-icon">▤</span><span class="secondary-pane-title"></span><span class="secondary-pane-state">已儲存</span><button class="pane-mode" title="切換編輯／並排／閱讀">編輯</button><button class="pane-primary icon-btn" title="在主要窗格開啟">↗</button><button class="pane-close icon-btn" title="關閉窗格">×</button></header><div class="secondary-pane-body"><textarea class="secondary-pane-editor" spellcheck="true"></textarea><article class="secondary-pane-preview markdown-body"></article></div>`;
+  pane.element = element; pane.editor = element.querySelector('.secondary-pane-editor'); pane.preview = element.querySelector('.secondary-pane-preview'); pane.state = element.querySelector('.secondary-pane-state'); pane.body = element.querySelector('.secondary-pane-body');
+  element.querySelector('.secondary-pane-title').textContent = path;
+  pane.editor.value = content;
+  const render = () => {
+    pane.objectUrls.forEach(URL.revokeObjectURL); pane.objectUrls = [];
+    pane.preview.innerHTML = renderMarkdown(pane.editor.value, { resolveWiki: target => index?.resolve(target, pane.path) });
+    pane.preview.querySelectorAll('[data-wikilink]').forEach(link => link.onclick = () => { const target = index?.resolve(link.dataset.wikilink, pane.path); if (target) openPath(target.path); });
+    pane.preview.querySelectorAll('[data-vault-image]').forEach(async image => { const asset = resolveAsset(image.dataset.vaultImage, pane.path); if (!asset) return; const url = URL.createObjectURL(await vault.readBlob(asset.path)); pane.objectUrls.push(url); image.src = url; });
+  };
+  pane.save = async () => {
+    if (!pane.dirty) return;
+    clearTimeout(pane.timer); pane.state.textContent = '正在儲存…';
+    try {
+      pane.modified = await vault.writeText(pane.path, pane.editor.value, pane.modified);
+      pane.dirty = false; pane.state.textContent = '已儲存'; scheduleIndex();
+      if (pane.path === currentPath && !dirty) { $('editor').value = pane.editor.value; loadedModified = pane.modified; renderPreview(); }
+    } catch (error) {
+      pane.state.textContent = '外部版本衝突';
+      if (error.name === 'ExternalChangeError' && await confirmAction('這個窗格偵測到外部修改', `「${pane.path}」已被 FolderSync 或另一個窗格修改。要用這個窗格的內容覆蓋嗎？`, '保留這個窗格', true)) {
+        pane.modified = await vault.writeText(pane.path, pane.editor.value, null); pane.dirty = false; pane.state.textContent = '已儲存'; scheduleIndex();
+      } else toast(`「${pane.path}」尚未儲存`, true);
+    }
+  };
+  pane.editor.oninput = () => { pane.dirty = true; pane.state.textContent = '尚未儲存'; if (pane.mode !== 'edit') render(); clearTimeout(pane.timer); if (settings.autoSave) pane.timer = setTimeout(pane.save, 800); };
+  pane.editor.onkeydown = event => { if (eventMatchesShortcut(event, settings.shortcuts.save)) { event.preventDefault(); event.stopPropagation(); pane.save(); } };
+  element.querySelector('.pane-mode').onclick = event => {
+    pane.mode = pane.mode === 'edit' ? 'split' : pane.mode === 'split' ? 'read' : 'edit';
+    pane.body.className = `secondary-pane-body ${pane.mode}`; event.currentTarget.textContent = pane.mode === 'edit' ? '編輯' : pane.mode === 'split' ? '並排' : '閱讀'; render();
+  };
+  element.querySelector('.pane-primary').onclick = () => openPath(pane.path);
+  element.querySelector('.pane-close').onclick = () => closeSecondaryPane(pane.path);
+  const header = element.querySelector('.secondary-pane-header');
+  header.ondragstart = event => { event.dataTransfer.setData('text/mysyncnote-pane', pane.path); event.dataTransfer.effectAllowed = 'move'; };
+  element.ondragover = event => { if (![...event.dataTransfer.types].includes('text/mysyncnote-pane')) return; event.preventDefault(); const rect = element.getBoundingClientRect(); element.classList.toggle('pane-drop-before', event.clientX < rect.left + rect.width / 2); element.classList.toggle('pane-drop-after', event.clientX >= rect.left + rect.width / 2); };
+  element.ondragleave = () => element.classList.remove('pane-drop-before', 'pane-drop-after');
+  element.ondrop = event => {
+    const source = event.dataTransfer.getData('text/mysyncnote-pane'); if (!source || source === pane.path) return;
+    event.preventDefault(); const sourcePane = secondaryPanes.get(source); if (!sourcePane) return;
+    const before = element.classList.contains('pane-drop-before'); $('workspaceDock').insertBefore(sourcePane.element, before ? element : element.nextSibling); element.classList.remove('pane-drop-before', 'pane-drop-after'); persistSecondaryOrder();
+  };
+  secondaryPanes.set(path, pane);
+  if (insertBefore) $('workspaceDock').insertBefore(element, insertBefore);
+  else $('workspaceDock').insertBefore(element, $('graphWorkspace'));
+  secondaryPanePaths = [...secondaryPanes.keys()]; persistSecondaryOrder(); render();
+  showView(currentView === 'welcome' ? (currentPath ? (currentType === 'canvas' ? 'canvas' : 'note') : 'welcome') : currentView);
+}
+
+async function closeSecondaryPane(path, save = true) {
+  const pane = secondaryPanes.get(path); if (!pane) return;
+  if (save && pane.dirty) await pane.save();
+  clearTimeout(pane.timer); pane.objectUrls.forEach(URL.revokeObjectURL); pane.element.remove(); secondaryPanes.delete(path); persistSecondaryOrder();
+  if (!currentPath && !graphDocked && !secondaryPanes.size) showView('welcome');
+}
+
+function persistSecondaryOrder() {
+  secondaryPanePaths = [...$('workspaceDock').querySelectorAll('.secondary-note-pane')].map(element => element.dataset.path);
+  sessionStorage.setItem('mysyncnote-secondary-panes', JSON.stringify(secondaryPanePaths));
+}
+
+async function restoreSecondaryPanes() {
+  const paths = [...secondaryPanePaths].filter(path => vault.node(path)?.ext === 'md');
+  for (const pane of [...secondaryPanes.values()]) await closeSecondaryPane(pane.path, false);
+  secondaryPanePaths = [];
+  for (const path of paths) await addSecondaryPane(path);
+}
+
+function remapSecondaryPath(oldPath, newPath) {
+  const changes = [...secondaryPanes.values()].filter(pane => pane.path === oldPath || pane.path.startsWith(`${oldPath}/`));
+  for (const pane of changes) {
+    secondaryPanes.delete(pane.path); pane.path = `${newPath}${pane.path.slice(oldPath.length)}`; pane.element.dataset.path = pane.path; pane.element.querySelector('.secondary-pane-title').textContent = pane.path; secondaryPanes.set(pane.path, pane);
+  }
+  persistSecondaryOrder();
+}
+
+async function splitCurrentNote() {
+  if (!currentPath || currentType !== 'md') return toast('請先開啟一篇 Markdown 筆記');
+  await addSecondaryPane(currentPath);
 }
 
 async function closeTab(path) {
@@ -407,6 +580,8 @@ async function saveCurrent(silent = false) {
     try {
       const modified = await vault.writeText(pathAtStart, text, expected);
       if (currentPath === pathAtStart) { loadedModified = modified; dirty = false; setSaveState('已儲存'); }
+      const mirror = secondaryPanes.get(pathAtStart);
+      if (mirror && !mirror.dirty) { mirror.editor.value = text; mirror.modified = modified; mirror.state.textContent = '已同步'; }
       scheduleIndex();
       if (!silent) toast('已儲存');
     } catch (error) {
@@ -464,9 +639,9 @@ function renderPreview() {
   $('preview').querySelectorAll('[data-tag]').forEach(tag => tag.addEventListener('click', () => { $('fileSearch').value = `#${tag.dataset.tag}`; renderTree(); }));
 }
 
-function resolveAsset(target) {
+function resolveAsset(target, fromPath = currentPath) {
   const clean = decodeURIComponent(target).replace(/\\/g, '/');
-  const relative = `${dirname(currentPath)}/${clean}`.replace(/^\//, '');
+  const relative = `${dirname(fromPath)}/${clean}`.replace(/^\//, '');
   return vault?.node(relative) || vault?.node(clean) || [...(vault?.nodes.values() || [])].find(node => node.kind === 'file' && node.name.toLowerCase() === basename(clean).toLowerCase());
 }
 
@@ -558,7 +733,15 @@ async function importAttachments(files) {
 
 function openGraph() {
   if (!index) return toast('請先開啟筆記庫');
-  showView('graph'); updateGraph();
+  graphDocked = true; showView('graph');
+  requestAnimationFrame(() => { updateGraph(); graph.resize(); graph.draw(); });
+}
+
+function toggleGraphDock() { if (graphDocked) closeGraphDock(); else openGraph(); }
+
+function closeGraphDock() {
+  graphDocked = false; $('graphWorkspace').classList.add('hidden');
+  if (!currentPath && !secondaryPanes.size) showView('welcome');
 }
 
 function updateGraph() {
@@ -566,7 +749,7 @@ function updateGraph() {
   $('graphSummary').textContent = `${graph.nodes.length} 篇筆記 · ${graph.edges.length} 條連結`;
 }
 
-function closeSpecialView() { if (currentPath) showView(currentType === 'canvas' ? 'canvas' : 'note'); else showView('welcome'); }
+function closeSpecialView() { closeGraphDock(); }
 
 const graph = new GraphView($('graphCanvas'), path => openPath(path));
 const canvasView = new CanvasView({
@@ -580,8 +763,8 @@ const canvasView = new CanvasView({
 
 function openCommandPalette() {
   const commands = [
-    { label: '新增筆記', hint: 'Ctrl N', run: () => createNote() }, { label: '新增資料夾', run: () => createFolder() }, { label: '新增 Canvas', run: () => createCanvas() },
-    { label: '關聯圖譜', hint: 'Ctrl G', run: openGraph }, { label: '重新讀取筆記庫', run: refreshVault }, { label: '設定', run: openSettings }
+    { label: '新增筆記', hint: settings.shortcuts.newNote, run: () => createNote() }, { label: '新增資料夾', run: () => createFolder() }, { label: '新增 Canvas', run: () => createCanvas() },
+    { label: '關聯圖譜', hint: settings.shortcuts.graph, run: openGraph }, { label: '分割目前筆記', hint: settings.shortcuts.split, run: splitCurrentNote }, { label: '重新讀取筆記庫', run: refreshVault }, { label: '設定', run: openSettings }
   ];
   $('commandSearch').placeholder = '輸入指令或筆記名稱…'; $('commandSearch').value = ''; $('commandDialog').showModal();
   const render = () => {
@@ -595,7 +778,8 @@ function openCommandPalette() {
 
 async function refreshVault() {
   if (!vault) return;
-  if (dirty) await saveCurrent(true);
+  if (dirty || [...secondaryPanes.values()].some(pane => pane.dirty)) await saveAllPanes(true);
+  if (settingsFolderHandle) await loadSettingsFile(settingsFolderHandle);
   const previousModified = currentPath ? vault.node(currentPath)?.lastModified : null;
   await vault.scan(); await rebuildIndex(); renderTree();
   const current = vault.node(currentPath);
@@ -604,13 +788,76 @@ async function refreshVault() {
   toast('已重新讀取筆記庫');
 }
 
+async function saveAllPanes(silent = false) {
+  await saveCurrent(silent);
+  await Promise.all([...secondaryPanes.values()].map(pane => pane.save()));
+}
+
+function shortcutFromEvent(event) {
+  if (['Control', 'Shift', 'Alt', 'Meta'].includes(event.key)) return '';
+  const parts = [];
+  if (event.ctrlKey) parts.push('Ctrl');
+  if (event.altKey) parts.push('Alt');
+  if (event.shiftKey) parts.push('Shift');
+  if (event.metaKey) parts.push('Meta');
+  let key = event.key.length === 1 ? event.key.toUpperCase() : event.key;
+  if (key === ' ') key = 'Space';
+  parts.push(key);
+  return parts.join('+');
+}
+
+function eventMatchesShortcut(event, shortcut) {
+  if (!shortcut) return false;
+  return shortcutFromEvent(event).toLowerCase() === shortcut.toLowerCase();
+}
+
+function renderShortcutSettings() {
+  const container = $('shortcutSettings'); container.innerHTML = '';
+  for (const [action, label] of Object.entries(SHORTCUT_LABELS)) {
+    const row = document.createElement('label'); row.className = 'shortcut-row';
+    row.innerHTML = '<span></span><input class="shortcut-input" readonly>';
+    row.firstChild.textContent = label;
+    const input = row.querySelector('input'); input.value = settings.shortcuts[action] || ''; input.placeholder = '未設定';
+    input.onfocus = () => { input.classList.add('recording'); input.select(); };
+    input.onblur = () => input.classList.remove('recording');
+    input.onkeydown = event => {
+      event.preventDefault(); event.stopPropagation();
+      if (event.key === 'Backspace' || event.key === 'Delete') settings.shortcuts[action] = '';
+      else if (event.key === 'Escape') { input.blur(); return; }
+      else {
+        const value = shortcutFromEvent(event); if (!value) return;
+        for (const key of Object.keys(settings.shortcuts)) if (key !== action && settings.shortcuts[key].toLowerCase() === value.toLowerCase()) settings.shortcuts[key] = '';
+        settings.shortcuts[action] = value;
+      }
+      persistSettings(); renderShortcutSettings();
+    };
+    container.append(row);
+  }
+  const reset = document.createElement('button'); reset.type = 'button'; reset.textContent = '重設為預設快捷鍵';
+  reset.onclick = () => { settings.shortcuts = { ...DEFAULT_SHORTCUTS }; persistSettings(); renderShortcutSettings(); };
+  container.append(reset);
+}
+
 function openSettings() {
-  $('settingsVault').textContent = vault?.name || '尚未選擇'; $('attachmentFolder').value = settings.attachmentFolder; $('trashMode').value = settings.trashMode; $('updateLinks').checked = settings.updateLinks; $('autoSave').checked = settings.autoSave; $('settingsDialog').showModal();
+  $('settingsVault').textContent = vault?.name || '尚未選擇';
+  $('defaultFolder').value = settings.defaultFolder || '';
+  $('attachmentFolder').value = settings.attachmentFolder;
+  $('trashMode').value = settings.trashMode;
+  $('updateLinks').checked = settings.updateLinks;
+  $('autoSave').checked = settings.autoSave;
+  $('settingsFileName').value = settings.settingsFileName || 'mysyncnote-settings.json';
+  $('settingsFileLocation').textContent = settingsFolderHandle ? `${settingsFolderHandle.name}/${safeName(settings.settingsFileName, '.json')}` : '目前只儲存在這台裝置';
+  renderShortcutSettings();
+  $('settingsDialog').showModal();
 }
 
 // Main controls
 $('openVault').onclick = openVaultPicker; $('welcomeOpen').onclick = openVaultPicker; $('settingsChangeVault').onclick = openVaultPicker;
 $('newNote').onclick = () => createNote(); $('newFolder').onclick = () => createFolder(); $('newCanvas').onclick = () => createCanvas(); $('refreshVault').onclick = refreshVault;
+$('splitCurrent').onclick = splitCurrentNote;
+$('workspaceDock').ondragover = event => { if ([...event.dataTransfer.types].includes('text/mysyncnote-path')) { event.preventDefault(); $('workspaceDock').classList.add('drag-target'); } };
+$('workspaceDock').ondragleave = event => { if (!$('workspaceDock').contains(event.relatedTarget)) $('workspaceDock').classList.remove('drag-target'); };
+$('workspaceDock').ondrop = event => { $('workspaceDock').classList.remove('drag-target'); const path = event.dataTransfer.getData('text/mysyncnote-path'); if (path) { event.preventDefault(); addSecondaryPane(path); } };
 $('fileSearch').oninput = renderTree; $('fileSearch').onkeydown = event => { if (event.key === 'Escape') { event.currentTarget.value = ''; renderTree(); } };
 $('collapseLeft').onclick = () => { app.classList.add('left-collapsed'); app.classList.remove('left-open'); $('showLeft').classList.remove('hidden'); };
 $('showLeft').onclick = () => { if (innerWidth <= 760) app.classList.add('left-open'); else { app.classList.remove('left-collapsed'); $('showLeft').classList.add('hidden'); } };
@@ -635,32 +882,53 @@ $('documentMore').onclick = event => { const node = vault?.node(currentPath); if
 document.querySelectorAll('[data-panel]').forEach(button => button.onclick = () => { rightPanel = button.dataset.panel; document.querySelectorAll('[data-panel]').forEach(item => item.classList.toggle('active', item === button)); renderRightPanel(); });
 $('goBack').onclick = () => { if (historyIndex > 0) openPath(history[--historyIndex], false).then(updateHistoryButtons); };
 $('goForward').onclick = () => { if (historyIndex < history.length - 1) openPath(history[++historyIndex], false).then(updateHistoryButtons); };
-$('openGraph').onclick = openGraph; $('closeGraph').onclick = closeSpecialView; $('graphScope').onchange = updateGraph; $('graphDepth').oninput = updateGraph; $('graphFilter').oninput = updateGraph; $('graphIsolates').onclick = () => { $('graphIsolates').classList.toggle('active'); updateGraph(); };
+$('openGraph').onclick = toggleGraphDock; $('closeGraph').onclick = closeGraphDock; $('graphScope').onchange = updateGraph; $('graphDepth').oninput = updateGraph; $('graphFilter').oninput = updateGraph; $('graphIsolates').onclick = () => { $('graphIsolates').classList.toggle('active'); updateGraph(); };
 $('canvasAddText').onclick = () => canvasView.addText(); $('canvasAddNote').onclick = () => canvasView.addNote(); $('canvasAddGroup').onclick = () => canvasView.addGroup(); $('canvasFit').onclick = () => canvasView.fit(); $('canvasConnect').onclick = () => { const on = canvasView.toggleConnect(); $('canvasConnect').classList.toggle('primary', on); $('canvasConnect').textContent = on ? '請選兩個節點' : '連接節點'; }; $('closeCanvas').onclick = () => closeTab(currentPath);
 
 $('attachmentFolder').onchange = () => { settings.attachmentFolder = $('attachmentFolder').value.trim() || 'attachments'; persistSettings(); };
+$('defaultFolder').onchange = () => {
+  const path = $('defaultFolder').value.trim().replace(/\\/g, '/').replace(/^\/|\/$/g, '');
+  if (path && vault && vault.node(path)?.kind !== 'directory') { toast('這個相對路徑不是筆記庫裡的資料夾', true); $('defaultFolder').value = settings.defaultFolder || ''; return; }
+  settings.defaultFolder = path; persistSettings();
+  if (path && vault) { selectedPath = path; for (let parent = path; parent; parent = dirname(parent)) expanded.add(parent); renderTree(); }
+};
 $('trashMode').onchange = () => { settings.trashMode = $('trashMode').value; persistSettings(); };
 $('updateLinks').onchange = () => { settings.updateLinks = $('updateLinks').checked; persistSettings(); };
 $('autoSave').onchange = () => { settings.autoSave = $('autoSave').checked; persistSettings(); };
+$('settingsFileName').onchange = () => { settings.settingsFileName = safeName($('settingsFileName').value, '.json'); $('settingsFileName').value = settings.settingsFileName; persistSettings(); };
+$('chooseSettingsFolder').onclick = chooseSettingsFolder;
 
 addEventListener('keydown', event => {
-  const ctrl = event.ctrlKey || event.metaKey;
-  if (ctrl && event.key.toLowerCase() === 's') { event.preventDefault(); saveCurrent(); }
-  if (ctrl && event.key.toLowerCase() === 'p') { event.preventDefault(); openCommandPalette(); }
-  if (ctrl && event.key.toLowerCase() === 'k') { event.preventDefault(); $('fileSearch').focus(); }
-  if (ctrl && event.key.toLowerCase() === 'n') { event.preventDefault(); createNote(); }
-  if (ctrl && event.key.toLowerCase() === 'g') { event.preventDefault(); openGraph(); }
-  if (event.key === 'F2' && selectedPath && !event.target.matches('input,textarea')) { event.preventDefault(); renamePath(selectedPath); }
+  if (event.target.classList?.contains('shortcut-input')) return;
+  const typing = event.target.matches('input,textarea,[contenteditable]');
+  if (eventMatchesShortcut(event, settings.shortcuts.save)) { event.preventDefault(); saveCurrent(); }
+  else if (eventMatchesShortcut(event, settings.shortcuts.command)) { event.preventDefault(); openCommandPalette(); }
+  else if (eventMatchesShortcut(event, settings.shortcuts.search)) { event.preventDefault(); $('fileSearch').focus(); }
+  else if (eventMatchesShortcut(event, settings.shortcuts.newNote)) { event.preventDefault(); createNote(); }
+  else if (eventMatchesShortcut(event, settings.shortcuts.graph)) { event.preventDefault(); toggleGraphDock(); }
+  else if (eventMatchesShortcut(event, settings.shortcuts.rename) && selectedPath && !typing) { event.preventDefault(); renamePath(selectedPath); }
+  else if (eventMatchesShortcut(event, settings.shortcuts.toggleLeft) && !typing) { event.preventDefault(); if (innerWidth <= 760) app.classList.toggle('left-open'); else { app.classList.toggle('left-collapsed'); $('showLeft').classList.toggle('hidden', !app.classList.contains('left-collapsed')); } }
+  else if (eventMatchesShortcut(event, settings.shortcuts.split) && !typing) { event.preventDefault(); splitCurrentNote(); }
   if (event.key === 'Delete' && selectedPath && currentView !== 'canvas' && !event.target.matches('input,textarea,[contenteditable]')) { event.preventDefault(); deletePath(selectedPath); }
   if (event.key === 'Escape') { hideMobilePanels(); $('contextMenu').classList.add('hidden'); $('wikiSuggest').classList.add('hidden'); }
 });
 
-addEventListener('beforeunload', event => { if (dirty) { event.preventDefault(); event.returnValue = ''; } });
-document.addEventListener('visibilitychange', () => { if (document.hidden && dirty) saveCurrent(true); else if (!document.hidden && vault && !dirty) refreshVault(); });
-addEventListener('focus', () => { if (vault && !dirty && document.visibilityState === 'visible') refreshVault(); });
+addEventListener('beforeunload', event => { if (dirty || [...secondaryPanes.values()].some(pane => pane.dirty)) { event.preventDefault(); event.returnValue = ''; } });
+document.addEventListener('visibilitychange', () => { const anyDirty = dirty || [...secondaryPanes.values()].some(pane => pane.dirty); if (document.hidden && anyDirty) saveAllPanes(true); else if (!document.hidden && vault && !anyDirty) refreshVault(); });
+addEventListener('focus', () => { if (vault && !dirty && ![...secondaryPanes.values()].some(pane => pane.dirty) && document.visibilityState === 'visible') refreshVault(); });
 
 async function restore() {
   renderTree(); applyViewMode();
+  const recalledSettings = await recalledSettingsFolder();
+  if (recalledSettings) {
+    try {
+      const permission = await recalledSettings.queryPermission({ mode: 'readwrite' });
+      if (permission === 'granted') {
+        settingsFolderHandle = recalledSettings;
+        if (!await loadSettingsFile(recalledSettings)) await writeSettingsFile();
+      } else $('settingsFileLocation').textContent = `需要重新選擇「${recalledSettings.name}」`;
+    } catch (error) { console.warn('無法還原設定檔位置', error); }
+  }
   rememberedHandle = await recalledVault();
   if (!rememberedHandle) return;
   try {

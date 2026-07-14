@@ -20,6 +20,12 @@ export class GraphView {
     this.hover = null;
     this.frame = null;
     this.#events();
+    if ('ResizeObserver' in window) {
+      this.resizeObserver = new ResizeObserver(() => {
+        if (!this.canvas.closest('.hidden')) { this.resize(); this.draw(); }
+      });
+      this.resizeObserver.observe(this.canvas.parentElement);
+    }
   }
 
   setData(index, { scope = 'all', currentPath = '', depth = 2, filter = '', isolates = true } = {}) {

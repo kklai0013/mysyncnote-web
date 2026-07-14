@@ -52,6 +52,7 @@
         </nav>
         <div id="breadcrumbs" class="breadcrumbs">尚未開啟筆記庫</div>
         <button id="openGraph" class="icon-btn" title="關聯圖譜" aria-label="關聯圖譜">網</button>
+        <button id="splitCurrent" class="icon-btn" title="將目前筆記分割到新窗格" aria-label="分割目前筆記">分</button>
         <button id="toggleRight" class="icon-btn" title="資訊面板" aria-label="資訊面板">☷</button>
       </header>
 
@@ -67,7 +68,8 @@
         </div>
       </section>
 
-      <section id="noteWorkspace" class="note-workspace hidden">
+      <div id="workspaceDock" class="workspace-dock hidden">
+      <section id="noteWorkspace" class="note-workspace hidden dock-pane primary-pane">
         <header class="document-header">
           <div class="document-title-row">
             <input id="documentTitle" class="document-title" aria-label="筆記名稱" spellcheck="false">
@@ -104,7 +106,9 @@
         </div>
       </section>
 
-      <section id="graphWorkspace" class="graph-workspace hidden">
+      <div id="secondaryPanes" class="secondary-panes"></div>
+
+      <section id="graphWorkspace" class="graph-workspace hidden dock-pane graph-pane">
         <header class="special-toolbar">
           <div><h2>關聯圖譜</h2><span id="graphSummary">0 篇筆記</span></div>
           <label>範圍 <select id="graphScope"><option value="all">全部筆記</option><option value="local">目前筆記附近</option></select></label>
@@ -116,7 +120,7 @@
         <div class="graph-stage"><canvas id="graphCanvas"></canvas><div class="graph-help">拖曳節點 · 滾輪縮放 · 點擊開啟筆記</div></div>
       </section>
 
-      <section id="canvasWorkspace" class="canvas-workspace hidden">
+      <section id="canvasWorkspace" class="canvas-workspace hidden dock-pane canvas-pane">
         <header class="special-toolbar canvas-toolbar">
           <div><h2 id="canvasTitle">Canvas</h2><span id="canvasState">已儲存</span></div>
           <button id="canvasAddText">＋文字卡片</button>
@@ -131,6 +135,7 @@
           <div class="canvas-help">空白處拖曳平移 · 滾輪或雙指縮放 · 拖曳卡片移動</div>
         </div>
       </section>
+      </div>
     </main>
 
     <aside id="rightSidebar" class="sidebar right-sidebar" aria-label="筆記資訊">
@@ -160,8 +165,10 @@
   <dialog id="settingsDialog" class="dialog wide-dialog">
     <form method="dialog">
       <header><div><h2>MySyncNote 設定</h2><p>筆記內容只會寫入你開啟的筆記庫。</p></div><button value="cancel" class="icon-btn">×</button></header>
-      <section class="settings-section"><h3>筆記庫</h3><div class="setting-row"><div><b>目前筆記庫</b><small id="settingsVault">尚未選擇</small></div><button id="settingsChangeVault" type="button">更換筆記庫</button></div><div class="setting-row"><div><b>附件資料夾</b><small>貼上的圖片和附件存放位置</small></div><input id="attachmentFolder" value="attachments"></div><div class="setting-row"><div><b>刪除方式</b><small>刪除項目移到筆記庫的垃圾桶</small></div><select id="trashMode"><option value="trash">移到 .trash</option><option value="delete">直接刪除</option></select></div></section>
+      <section class="settings-section"><h3>筆記庫</h3><div class="setting-row"><div><b>目前筆記庫</b><small id="settingsVault">尚未選擇</small></div><button id="settingsChangeVault" type="button">更換筆記庫</button></div><div class="setting-row"><div><b>預設進入的資料夾</b><small>填寫筆記庫內的相對路徑，例如：工作/專案</small></div><input id="defaultFolder" placeholder="留空表示根目錄"></div><div class="setting-row"><div><b>附件資料夾</b><small>貼上的圖片和附件存放位置</small></div><input id="attachmentFolder" value="attachments"></div><div class="setting-row"><div><b>刪除方式</b><small>刪除項目移到筆記庫的垃圾桶</small></div><select id="trashMode"><option value="trash">移到 .trash</option><option value="delete">直接刪除</option></select></div></section>
       <section class="settings-section"><h3>編輯與連結</h3><label class="setting-row"><span><b>重新命名時更新連結</b><small>自動更新其他 Markdown 筆記中的 Wiki Link</small></span><input id="updateLinks" type="checkbox" checked></label><label class="setting-row"><span><b>自動儲存</b><small>停止輸入後自動寫入檔案</small></span><input id="autoSave" type="checkbox" checked></label></section>
+      <section class="settings-section"><h3>快捷鍵</h3><p class="settings-hint">點欄位後直接按下新的按鍵組合；Backspace 可清除。</p><div id="shortcutSettings" class="shortcut-settings"></div></section>
+      <section class="settings-section"><h3>設定檔</h3><div class="setting-row"><div><b>設定檔位置</b><small id="settingsFileLocation">目前只儲存在這台裝置</small></div><button id="chooseSettingsFolder" type="button">選擇資料夾</button></div><div class="setting-row"><div><b>設定檔名稱</b><small>會在選定位置建立一個可同步的 JSON 檔</small></div><input id="settingsFileName" value="mysyncnote-settings.json"></div></section>
       <section class="settings-section"><h3>外部同步</h3><p>MySyncNote 不登入 Google，也不持有同步帳號。請讓 FolderSync 同步同一個筆記庫；回到本程式時會重新檢查外部修改。</p></section>
     </form>
   </dialog>
