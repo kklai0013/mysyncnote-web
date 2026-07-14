@@ -1,12 +1,14 @@
 {
   "name": "MySyncNote",
   "short_name": "MySyncNote",
-  "description": "直接編輯 Markdown 資料夾的筆記軟體",
+  "description": "直接編輯本機 Markdown 筆記庫的離線優先筆記工具",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#0d0f0e",
-  "theme_color": "#121513",
+  "orientation": "any",
+  "background_color": "#111316",
+  "theme_color": "#17191d",
+  "categories": ["productivity", "utilities"],
   "icons": [
     { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
   ]

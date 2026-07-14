@@ -2,97 +2,173 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#121513">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#17191d">
+  <meta name="description" content="直接編輯本機 Markdown 筆記庫的離線優先筆記工具">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="fixes.css">
   <title>MySyncNote</title>
-  <style>
-    :root{color-scheme:dark;--bg:#0d0f0e;--side:#121513;--line:#303731;--text:#edf2ee;--muted:#96a199;--green:#9be3b8;--green2:#193b27}*{box-sizing:border-box}html,body{height:100%}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 system-ui,"Segoe UI",sans-serif}button,input,textarea{font:inherit}button{min-height:38px;padding:0 12px;border:1px solid #3b453e;border-radius:9px;background:#252b27;color:inherit;cursor:pointer;font-weight:700}button.primary{border-color:transparent;background:var(--green);color:#092014}button:disabled{opacity:.38;cursor:not-allowed}.app{height:100%;display:grid;grid-template-columns:280px 1fr}.sidebar{min-width:0;display:flex;flex-direction:column;border-right:1px solid var(--line);background:var(--side)}.brand{padding:18px;border-bottom:1px solid var(--line)}.brand h1{margin:0;font-size:1.25rem}.brand p{margin:3px 0 0;color:var(--muted);font-size:.78rem}.storage{margin:12px;padding:12px;border:1px solid var(--line);border-radius:12px;background:#0e110f}.storage-head{display:flex;justify-content:space-between;gap:8px;align-items:center}.storage b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.badge{flex:none;padding:2px 7px;border-radius:999px;background:var(--green2);color:var(--green);font-size:.68rem;font-weight:800}.storage p{margin:7px 0;color:var(--muted);font-size:.78rem}.storage button{width:100%}.new{margin:0 12px 10px}.search{margin:0 12px 10px;width:calc(100% - 24px);height:38px;padding:0 11px;border:1px solid var(--line);border-radius:9px;background:#0c0f0d;color:var(--text);outline:none}.files{min-height:0;overflow:auto;padding:0 8px 16px}.file{display:flex;align-items:center;gap:9px;width:100%;margin:2px 0;padding:8px 10px;border:0;background:transparent;text-align:left;font-weight:500}.file:hover,.file.active{background:#242a26}.file.active{color:var(--green)}.file span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.editor{min-width:0;display:flex;flex-direction:column}.toolbar{min-height:60px;padding:10px 16px;display:flex;align-items:center;gap:9px;border-bottom:1px solid var(--line);background:#101311}.title{min-width:0;flex:1;border:0;background:transparent;color:var(--text);font-size:1.12rem;font-weight:750;outline:none}.save-state{color:var(--muted);font-size:.78rem}.workspace{min-height:0;flex:1;display:grid;grid-template-columns:1fr}.workspace.previewing{grid-template-columns:1fr 1fr}.write,.preview{min-width:0;height:100%;overflow:auto}.write textarea{display:block;width:100%;height:100%;resize:none;padding:34px max(28px,8vw);border:0;outline:none;background:var(--bg);color:var(--text);font:16px/1.8 ui-monospace,"Cascadia Code",monospace}.preview{display:none;padding:34px max(28px,5vw);border-left:1px solid var(--line);background:#111412}.previewing .preview{display:block}.preview h1,.preview h2,.preview h3{line-height:1.25}.preview code{padding:2px 5px;border-radius:5px;background:#242a26;color:#c9f1d8}.preview pre{overflow:auto;padding:14px;border-radius:10px;background:#090b0a}.preview blockquote{margin-left:0;padding-left:14px;border-left:3px solid var(--green);color:var(--muted)}.mobile-head{display:none}.notice{position:fixed;right:18px;bottom:18px;max-width:min(420px,calc(100% - 36px));padding:12px 15px;border:1px solid var(--line);border-radius:11px;background:#222824;box-shadow:0 15px 40px #0008}.notice.error{border-color:#744;color:#ffd3d3}.hidden{display:none!important}
-    @media(max-width:760px){.app{display:block}.sidebar{position:fixed;z-index:5;inset:0 54px 0 0;transform:translateX(-110%);transition:.18s;box-shadow:18px 0 50px #0009}.sidebar.open{transform:none}.mobile-head{display:inline-flex}.toolbar{padding:8px}.workspace.previewing{grid-template-columns:1fr}.previewing .write{display:none}.write textarea,.preview{padding:22px 18px}.save-state{display:none}}
-  </style>
 </head>
 <body>
-<div class="app">
-  <aside id="sidebar" class="sidebar">
-    <div class="brand"><h1>MySyncNote</h1><p>Markdown 筆記</p></div>
-    <section class="storage">
-      <div class="storage-head"><b id="folderName">示範模式</b><span id="modeBadge" class="badge">未連接</span></div>
-      <p id="storageHelp">先讓 FolderSync 建立本機同步資料夾，再由這裡選取同一個資料夾。</p>
-      <button id="openFolder" class="primary">選擇同步資料夾</button>
-    </section>
-    <button id="newNote" class="new primary">＋ 新增筆記</button>
-    <input id="search" class="search" placeholder="搜尋檔名">
-    <nav id="files" class="files"></nav>
-  </aside>
+  <div id="app" class="app">
+    <aside id="leftSidebar" class="sidebar left-sidebar" aria-label="筆記庫導覽">
+      <header class="sidebar-titlebar">
+        <button id="vaultMenu" class="vault-title" title="筆記庫選單">
+          <span class="app-mark">M</span>
+          <span><strong id="vaultName">MySyncNote</strong><small id="vaultState">尚未開啟筆記庫</small></span>
+        </button>
+        <button id="collapseLeft" class="icon-btn" title="收起側邊欄" aria-label="收起側邊欄">‹</button>
+      </header>
 
-  <main class="editor">
-    <header class="toolbar">
-      <button id="menu" class="mobile-head">☰</button>
-      <input id="title" class="title" value="歡迎使用 MySyncNote" aria-label="筆記名稱">
-      <span id="saveState" class="save-state">示範筆記</span>
-      <button id="rename">F2 改名</button>
-      <button id="previewButton">預覽</button>
-      <button id="save" class="primary">儲存</button>
-    </header>
-    <section id="workspace" class="workspace">
-      <div class="write"><textarea id="content" spellcheck="false"></textarea></div>
-      <article id="preview" class="preview"></article>
-    </section>
-  </main>
-</div>
-<div id="notice" class="notice hidden"></div>
+      <div class="explorer-tools">
+        <button id="newNote" class="icon-btn" title="新增筆記" aria-label="新增筆記">＋頁</button>
+        <button id="newFolder" class="icon-btn" title="新增資料夾" aria-label="新增資料夾">＋夾</button>
+        <button id="newCanvas" class="icon-btn" title="新增 Canvas" aria-label="新增 Canvas">＋圖</button>
+        <button id="refreshVault" class="icon-btn" title="重新讀取筆記庫" aria-label="重新讀取筆記庫">↻</button>
+        <button id="explorerMore" class="icon-btn" title="更多" aria-label="更多選項">•••</button>
+      </div>
+      <label class="search-box">
+        <span>⌕</span>
+        <input id="fileSearch" type="search" placeholder="搜尋檔名或內容" autocomplete="off">
+        <kbd>Ctrl K</kbd>
+      </label>
+      <div id="fileTree" class="file-tree" role="tree"></div>
+      <footer class="sidebar-footer">
+        <button id="openVault" class="footer-action"><span>▣</span><span id="openVaultText">開啟筆記庫</span></button>
+        <button id="openSettings" class="icon-btn" title="設定" aria-label="設定">⚙</button>
+      </footer>
+    </aside>
 
-<script>
-  const $=id=>document.getElementById(id);
-  const demo={name:'歡迎使用 MySyncNote.md',content:'# 歡迎使用 MySyncNote\n\nMySyncNote 現在只編輯手機或電腦上的本機 Markdown 資料夾。\n\n## FolderSync 同步方式\n\n1. 在手機用 FolderSync 建立「Google Drive ↔ 手機本機資料夾」雙向同步。\n2. 在 MySyncNote 按「選擇同步資料夾」。\n3. 選擇 FolderSync 使用的同一個手機資料夾。\n4. MySyncNote 負責編輯，FolderSync 負責上傳及下載。\n\n- 按 `Ctrl+S` 儲存\n- 按 `F2` 重新命名\n- 按「預覽」查看 Markdown\n'};
-  let directory=null,pendingFolder=null,notes=[{...demo,handle:null}],current=notes[0],dirty=false,previewing=false,autoSaveTimer=null,editVersion=0;
+    <div id="leftScrim" class="scrim"></div>
 
-  const escape=s=>s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-  function markdown(source){let s=escape(source);s=s.replace(/^```([\s\S]*?)```$/gm,'<pre><code>$1</code></pre>').replace(/^### (.+)$/gm,'<h3>$1</h3>').replace(/^## (.+)$/gm,'<h2>$1</h2>').replace(/^# (.+)$/gm,'<h1>$1</h1>').replace(/^> (.+)$/gm,'<blockquote>$1</blockquote>').replace(/^[-*] (.+)$/gm,'<li>$1</li>').replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>').replace(/\n\n/g,'</p><p>').replace(/\n/g,'<br>');return '<p>'+s+'</p>'}
-  function notify(text,error=false){$('notice').textContent=text;$('notice').className='notice'+(error?' error':'');clearTimeout(notify.timer);notify.timer=setTimeout(()=>$('notice').classList.add('hidden'),3500)}
-  function folderDb(){return new Promise((resolve,reject)=>{const request=indexedDB.open('mysyncnote-settings',1);request.onupgradeneeded=()=>request.result.createObjectStore('handles');request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error)})}
-  async function rememberFolder(handle){try{const db=await folderDb();await new Promise((resolve,reject)=>{const tx=db.transaction('handles','readwrite');tx.objectStore('handles').put(handle,'last-folder');tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error)});db.close()}catch{/* Some browsers cannot store file handles. */}}
-  async function readRememberedFolder(){try{const db=await folderDb();const handle=await new Promise((resolve,reject)=>{const request=db.transaction('handles').objectStore('handles').get('last-folder');request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error)});db.close();return handle}catch{return null}}
-  function cleanName(name){name=name.trim().replace(/[\\/:*?"<>|]/g,'-');if(!name.toLowerCase().endsWith('.md'))name+='.md';return name||'未命名.md'}
-  function renderList(){const q=$('search').value.toLowerCase();$('files').innerHTML='';notes.filter(n=>n.name.toLowerCase().includes(q)).forEach(n=>{const b=document.createElement('button');b.className='file'+(n===current?' active':'');b.innerHTML='<span>▤</span><span></span>';b.lastChild.textContent=n.name;b.onclick=()=>select(n);$('files').append(b)})}
-  async function select(note){if(current&&dirty)await save();current=note;$('title').value=note.name.replace(/\.md$/i,'');$('content').value=note.content;dirty=false;updateState();renderList();renderPreview();$('sidebar').classList.remove('open')}
-  function updateState(){if(!current)return;$('saveState').textContent=directory?(dirty?'等待自動儲存…':'已儲存'):'示範模式';$('rename').disabled=!directory||!current.handle}
-  function renderPreview(){$('preview').innerHTML=markdown($('content').value)}
-  function scheduleAutoSave(){if(!directory)return;clearTimeout(autoSaveTimer);$('saveState').textContent='等待自動儲存…';autoSaveTimer=setTimeout(()=>save(true),800)}
+    <main class="main">
+      <header class="main-header">
+        <button id="showLeft" class="icon-btn hidden" title="顯示檔案總管" aria-label="顯示檔案總管">☰</button>
+        <nav class="history-nav" aria-label="瀏覽紀錄">
+          <button id="goBack" class="icon-btn" title="上一頁" disabled>←</button>
+          <button id="goForward" class="icon-btn" title="下一頁" disabled>→</button>
+        </nav>
+        <div id="breadcrumbs" class="breadcrumbs">尚未開啟筆記庫</div>
+        <button id="openGraph" class="icon-btn" title="關聯圖譜" aria-label="關聯圖譜">網</button>
+        <button id="toggleRight" class="icon-btn" title="資訊面板" aria-label="資訊面板">☷</button>
+      </header>
 
-  async function loadFolder(handle){
-    directory=handle;pendingFolder=null;notes=[];dirty=false;current=null;
-    for await(const entry of directory.values()){
-      if(entry.kind==='file'&&entry.name.toLowerCase().endsWith('.md')){const file=await entry.getFile();notes.push({name:entry.name,content:await file.text(),handle:entry})}
-    }
-    notes.sort((a,b)=>a.name.localeCompare(b.name,'zh-Hant'));
-    $('folderName').textContent=directory.name;$('modeBadge').textContent='FolderSync';$('storageHelp').textContent='已記住這個資料夾；重新開啟時會自動恢復。修改後約 0.8 秒自動儲存。';$('openFolder').textContent='更換同步資料夾';
-    if(notes.length)await select(notes[0]);else await createNote();renderList();notify(`已開啟 ${directory.name}`)
-  }
-  async function openFolder(){
-    if(!window.showDirectoryPicker){notify(`目前瀏覽器不能選擇資料夾（安全環境：${isSecureContext?'是':'否'}）`,true);return}
-    try{
-      if(pendingFolder){const permission=await pendingFolder.requestPermission({mode:'readwrite'});if(permission==='granted'){const handle=pendingFolder;await rememberFolder(handle);await loadFolder(handle);return}}
-      const handle=await showDirectoryPicker({mode:'readwrite'});await rememberFolder(handle);await loadFolder(handle)
-    }catch(e){if(e.name!=='AbortError')notify(`${e.name}: ${e.message}`,true)}
-  }
-  async function restoreFolder(){const handle=await readRememberedFolder();if(!handle)return;try{const permission=await handle.queryPermission({mode:'readwrite'});if(permission==='granted'){await loadFolder(handle)}else{pendingFolder=handle;$('folderName').textContent=handle.name;$('modeBadge').textContent='需要授權';$('storageHelp').textContent='瀏覽器記得上次的資料夾；按下方按鈕重新允許即可，不必重新尋找。';$('openFolder').textContent=`重新連接 ${handle.name}`}}catch{/* Keep demo mode if the saved handle is no longer valid. */}}
-  async function createNote(){if(current&&dirty)await save();let base='未命名筆記',i=1,name=base+'.md';while(notes.some(n=>n.name===name))name=`${base} ${++i}.md`;let handle=null;if(directory)handle=await directory.getFileHandle(name,{create:true});const note={name,content:'# 未命名筆記\n\n開始寫作…\n',handle};notes.unshift(note);await select(note);dirty=true;editVersion++;updateState();scheduleAutoSave();$('title').focus();$('title').select()}
-  async function save(silent=false){if(typeof silent!=='boolean')silent=false;if(!current)return;current.content=$('content').value;if(!directory){if(!silent)notify('示範模式不會永久儲存；請先選擇 FolderSync 的本機資料夾');return}const savingVersion=editVersion;try{if(!current.handle)current.handle=await directory.getFileHandle(current.name,{create:true});const out=await current.handle.createWritable();await out.write(current.content);await out.close();if(editVersion===savingVersion)dirty=false;updateState();if(!silent)notify(`已儲存 ${current.name}`);else $('saveState').textContent=dirty?'等待自動儲存…':'已自動儲存';if(dirty)scheduleAutoSave()}catch(e){notify(`${e.name}: ${e.message}`,true)}}
-  async function rename(){if(!directory||!current?.handle)return;const next=cleanName($('title').value);if(next===current.name)return;try{const newHandle=await directory.getFileHandle(next,{create:true});const out=await newHandle.createWritable();await out.write($('content').value);await out.close();await directory.removeEntry(current.name);current.name=next;current.handle=newHandle;dirty=false;renderList();updateState();notify(`已改名為 ${next}`)}catch(e){notify(`${e.name}: ${e.message}`,true)}}
+      <div id="tabs" class="tabs" role="tablist"></div>
 
-  $('openFolder').onclick=openFolder;$('newNote').onclick=createNote;$('save').onclick=()=>save(false);$('rename').onclick=rename;$('search').oninput=renderList;
-  $('content').oninput=()=>{dirty=true;editVersion++;current.content=$('content').value;updateState();scheduleAutoSave();if(previewing)renderPreview()};
-  $('title').oninput=()=>{dirty=true;updateState()};$('title').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();rename()}};
-  $('previewButton').onclick=()=>{previewing=!previewing;$('workspace').classList.toggle('previewing',previewing);$('previewButton').textContent=previewing?'編輯':'預覽';renderPreview()};
-  $('menu').onclick=()=>$('sidebar').classList.toggle('open');
-  addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){e.preventDefault();save()}if(e.key==='F2'){e.preventDefault();$('title').focus();$('title').select()}});
-  addEventListener('beforeunload',e=>{if(dirty){e.preventDefault();e.returnValue=''}});
-  document.addEventListener('visibilitychange',()=>{if(document.hidden&&dirty&&directory)save(true)});
-  $('content').value=current.content;renderList();renderPreview();updateState();
-  if('serviceWorker' in navigator&&location.protocol.startsWith('http'))navigator.serviceWorker.register('./sw.js').catch(()=>{});
-  restoreFolder();
-</script>
+      <section id="welcome" class="welcome">
+        <div class="welcome-card">
+          <div class="welcome-mark">M</div>
+          <h1>你的 Markdown 筆記庫</h1>
+          <p>直接開啟電腦或手機上的資料夾。筆記保持為一般的 <code>.md</code>、附件和 <code>.canvas</code> 檔案。</p>
+          <button id="welcomeOpen" class="primary large">開啟筆記庫</button>
+          <p class="hint">FolderSync 或其他工具可以同步這個資料夾；MySyncNote 不需要 Google API。</p>
+        </div>
+      </section>
+
+      <section id="noteWorkspace" class="note-workspace hidden">
+        <header class="document-header">
+          <div class="document-title-row">
+            <input id="documentTitle" class="document-title" aria-label="筆記名稱" spellcheck="false">
+            <span id="saveState" class="save-state">已儲存</span>
+            <button id="documentMore" class="icon-btn" title="筆記選單" aria-label="筆記選單">•••</button>
+          </div>
+          <div class="editor-toolbar" aria-label="Markdown 格式工具列">
+            <button data-format="heading" title="標題">H</button>
+            <button data-format="bold" title="粗體"><b>B</b></button>
+            <button data-format="italic" title="斜體"><i>I</i></button>
+            <button data-format="strike" title="刪除線"><s>S</s></button>
+            <button data-format="highlight" title="醒目標記">螢</button>
+            <span class="tool-separator"></span>
+            <button data-format="link" title="連結">鏈</button>
+            <button data-format="wikilink" title="Wiki 連結">[[]]</button>
+            <button data-format="code" title="程式碼">&lt;/&gt;</button>
+            <button data-format="quote" title="引用">❝</button>
+            <button data-format="list" title="清單">☷</button>
+            <button data-format="task" title="待辦事項">☑</button>
+            <span class="tool-spacer"></span>
+            <div class="view-switch" role="group" aria-label="檢視模式">
+              <button data-view="edit" class="active">編輯</button>
+              <button data-view="split">並排</button>
+              <button data-view="read">閱讀</button>
+            </div>
+          </div>
+        </header>
+        <div id="editorArea" class="editor-area mode-edit">
+          <div class="source-pane">
+            <textarea id="editor" aria-label="Markdown 編輯器" spellcheck="true"></textarea>
+            <div id="wikiSuggest" class="suggestions hidden"></div>
+          </div>
+          <article id="preview" class="markdown-body"></article>
+        </div>
+      </section>
+
+      <section id="graphWorkspace" class="graph-workspace hidden">
+        <header class="special-toolbar">
+          <div><h2>關聯圖譜</h2><span id="graphSummary">0 篇筆記</span></div>
+          <label>範圍 <select id="graphScope"><option value="all">全部筆記</option><option value="local">目前筆記附近</option></select></label>
+          <label>層數 <input id="graphDepth" type="range" min="1" max="4" value="2"></label>
+          <label class="search-box compact"><span>⌕</span><input id="graphFilter" placeholder="篩選檔名、資料夾或標籤"></label>
+          <button id="graphIsolates" class="toggle active">顯示孤立筆記</button>
+          <button id="closeGraph" class="icon-btn" title="關閉">×</button>
+        </header>
+        <div class="graph-stage"><canvas id="graphCanvas"></canvas><div class="graph-help">拖曳節點 · 滾輪縮放 · 點擊開啟筆記</div></div>
+      </section>
+
+      <section id="canvasWorkspace" class="canvas-workspace hidden">
+        <header class="special-toolbar canvas-toolbar">
+          <div><h2 id="canvasTitle">Canvas</h2><span id="canvasState">已儲存</span></div>
+          <button id="canvasAddText">＋文字卡片</button>
+          <button id="canvasAddNote">＋筆記卡片</button>
+          <button id="canvasAddGroup">＋群組</button>
+          <button id="canvasConnect">連接節點</button>
+          <button id="canvasFit">符合畫面</button>
+          <button id="closeCanvas" class="icon-btn" title="關閉">×</button>
+        </header>
+        <div id="canvasViewport" class="canvas-viewport">
+          <div id="canvasSurface" class="canvas-surface"><svg id="canvasEdges" class="canvas-edges"></svg><div id="canvasNodes"></div></div>
+          <div class="canvas-help">空白處拖曳平移 · 滾輪或雙指縮放 · 拖曳卡片移動</div>
+        </div>
+      </section>
+    </main>
+
+    <aside id="rightSidebar" class="sidebar right-sidebar" aria-label="筆記資訊">
+      <header class="sidebar-titlebar"><strong>筆記資訊</strong><button id="collapseRight" class="icon-btn" title="收起資訊面板">›</button></header>
+      <div class="panel-tabs" role="tablist">
+        <button data-panel="outline" class="active">大綱</button>
+        <button data-panel="backlinks">反向連結</button>
+        <button data-panel="links">外部連結</button>
+        <button data-panel="properties">屬性</button>
+      </div>
+      <div id="rightPanel" class="right-panel"></div>
+    </aside>
+  </div>
+
+  <div id="contextMenu" class="context-menu hidden" role="menu"></div>
+  <dialog id="inputDialog" class="dialog">
+    <form method="dialog">
+      <h2 id="dialogTitle">輸入名稱</h2>
+      <p id="dialogHelp"></p>
+      <input id="dialogInput" autocomplete="off">
+      <div class="dialog-actions"><button value="cancel">取消</button><button id="dialogConfirm" value="default" class="primary">確認</button></div>
+    </form>
+  </dialog>
+  <dialog id="confirmDialog" class="dialog">
+    <form method="dialog"><h2 id="confirmTitle">確認</h2><p id="confirmMessage"></p><div id="confirmExtra"></div><div class="dialog-actions"><button value="cancel">取消</button><button id="confirmOk" value="default" class="danger">確認</button></div></form>
+  </dialog>
+  <dialog id="settingsDialog" class="dialog wide-dialog">
+    <form method="dialog">
+      <header><div><h2>MySyncNote 設定</h2><p>筆記內容只會寫入你開啟的筆記庫。</p></div><button value="cancel" class="icon-btn">×</button></header>
+      <section class="settings-section"><h3>筆記庫</h3><div class="setting-row"><div><b>目前筆記庫</b><small id="settingsVault">尚未選擇</small></div><button id="settingsChangeVault" type="button">更換筆記庫</button></div><div class="setting-row"><div><b>附件資料夾</b><small>貼上的圖片和附件存放位置</small></div><input id="attachmentFolder" value="attachments"></div><div class="setting-row"><div><b>刪除方式</b><small>刪除項目移到筆記庫的垃圾桶</small></div><select id="trashMode"><option value="trash">移到 .trash</option><option value="delete">直接刪除</option></select></div></section>
+      <section class="settings-section"><h3>編輯與連結</h3><label class="setting-row"><span><b>重新命名時更新連結</b><small>自動更新其他 Markdown 筆記中的 Wiki Link</small></span><input id="updateLinks" type="checkbox" checked></label><label class="setting-row"><span><b>自動儲存</b><small>停止輸入後自動寫入檔案</small></span><input id="autoSave" type="checkbox" checked></label></section>
+      <section class="settings-section"><h3>外部同步</h3><p>MySyncNote 不登入 Google，也不持有同步帳號。請讓 FolderSync 同步同一個筆記庫；回到本程式時會重新檢查外部修改。</p></section>
+    </form>
+  </dialog>
+  <dialog id="commandDialog" class="dialog command-dialog">
+    <form method="dialog"><input id="commandSearch" placeholder="輸入指令或筆記名稱…" autocomplete="off"><div id="commandResults" class="command-results"></div></form>
+  </dialog>
+  <div id="toast" class="toast hidden" role="status"></div>
+  <script type="module" src="js/app.js"></script>
 </body>
 </html>

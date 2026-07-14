@@ -1,0 +1,674 @@
+import { Vault, rememberVault, recalledVault, safeName, dirname, basename } from './storage.js';
+import { renderMarkdown, extractHeadings, extractTags, extractLinks, buildIndex, noteStem, replaceWikiTarget, parseFrontmatter } from './markdown.js';
+import { GraphView } from './graph.js';
+import { CanvasView } from './canvas.js';
+
+const $ = id => document.getElementById(id);
+const app = $('app');
+const settings = Object.assign({ attachmentFolder: 'attachments', trashMode: 'trash', updateLinks: true, autoSave: true }, JSON.parse(localStorage.getItem('mysyncnote-preferences') || '{}'));
+let vault = null;
+let rememberedHandle = null;
+let index = null;
+let selectedPath = '';
+let currentPath = '';
+let currentType = '';
+let loadedModified = null;
+let dirty = false;
+let autoSaveTimer = null;
+let saveChain = Promise.resolve();
+let indexingTimer = null;
+let rightPanel = 'outline';
+let viewMode = localStorage.getItem('mysyncnote-view') || 'edit';
+let currentView = 'welcome';
+let tabs = JSON.parse(sessionStorage.getItem('mysyncnote-tabs') || '[]');
+let history = [];
+let historyIndex = -1;
+let objectUrls = [];
+const expanded = new Set(JSON.parse(localStorage.getItem('mysyncnote-expanded') || '[]'));
+
+function persistSettings() {
+  localStorage.setItem('mysyncnote-preferences', JSON.stringify(settings));
+  localStorage.setItem('mysyncnote-expanded', JSON.stringify([...expanded]));
+}
+
+function toast(message, error = false) {
+  const element = $('toast');
+  element.textContent = message;
+  element.className = `toast${error ? ' error' : ''}`;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => element.classList.add('hidden'), error ? 6000 : 3200);
+}
+
+function setSaveState(text, error = false) {
+  $('saveState').textContent = text;
+  $('saveState').classList.toggle('error', error);
+  $('canvasState').textContent = text;
+}
+
+function showView(name) {
+  currentView = name;
+  $('welcome').classList.toggle('hidden', name !== 'welcome');
+  $('noteWorkspace').classList.toggle('hidden', name !== 'note');
+  $('graphWorkspace').classList.toggle('hidden', name !== 'graph');
+  $('canvasWorkspace').classList.toggle('hidden', name !== 'canvas');
+}
+
+function hideMobilePanels() {
+  app.classList.remove('left-open', 'right-open');
+}
+
+async function ask(title, value = '', help = '') {
+  $('dialogTitle').textContent = title;
+  $('dialogHelp').textContent = help;
+  $('dialogInput').value = value;
+  $('inputDialog').showModal();
+  setTimeout(() => { $('dialogInput').focus(); $('dialogInput').select(); }, 0);
+  const result = await new Promise(resolve => $('inputDialog').addEventListener('close', () => resolve($('inputDialog').returnValue), { once: true }));
+  return result === 'default' ? $('dialogInput').value.trim() : null;
+}
+
+async function confirmAction(title, message, okText = '確認', danger = true) {
+  $('confirmTitle').textContent = title;
+  $('confirmMessage').textContent = message;
+  $('confirmExtra').innerHTML = '';
+  $('confirmOk').textContent = okText;
+  $('confirmOk').className = danger ? 'danger' : 'primary';
+  $('confirmDialog').showModal();
+  const result = await new Promise(resolve => $('confirmDialog').addEventListener('close', () => resolve($('confirmDialog').returnValue), { once: true }));
+  return result === 'default';
+}
+
+async function chooseFromList(title, items, getLabel = item => item, placeholder = '搜尋…') {
+  $('commandSearch').placeholder = placeholder;
+  $('commandSearch').value = '';
+  $('commandDialog').showModal();
+  const render = () => {
+    const query = $('commandSearch').value.toLowerCase();
+    $('commandResults').innerHTML = '';
+    for (const item of items.filter(candidate => getLabel(candidate).toLowerCase().includes(query)).slice(0, 80)) {
+      const button = document.createElement('button');
+      button.type = 'button'; button.className = 'command-result';
+      button.innerHTML = '<span>›</span><span></span>';
+      button.lastChild.textContent = getLabel(item) || '筆記庫根目錄';
+      button.onclick = () => { $('commandDialog').returnValue = JSON.stringify(item); $('commandDialog').close(); };
+      $('commandResults').append(button);
+    }
+    if (!$('commandResults').children.length) $('commandResults').innerHTML = `<div class="panel-empty">${title}：找不到符合項目</div>`;
+  };
+  render();
+  setTimeout(() => $('commandSearch').focus(), 0);
+  const listener = () => render();
+  $('commandSearch').addEventListener('input', listener);
+  const result = await new Promise(resolve => $('commandDialog').addEventListener('close', () => resolve($('commandDialog').returnValue), { once: true }));
+  $('commandSearch').removeEventListener('input', listener);
+  try { return result ? JSON.parse(result) : null; } catch { return null; }
+}
+
+function selectedFolder() {
+  const selected = vault?.node(selectedPath);
+  if (selected?.kind === 'directory') return selected.path;
+  if (currentPath) return dirname(currentPath);
+  return '';
+}
+
+async function openVaultPicker() {
+  if (!window.showDirectoryPicker) {
+    toast('這個瀏覽器不能直接開啟資料夾。請使用最新版 Chrome 或 Edge，並從 HTTPS 網址開啟。', true);
+    return;
+  }
+  try {
+    let handle;
+    if (rememberedHandle) {
+      const permission = await rememberedHandle.requestPermission({ mode: 'readwrite' });
+      if (permission === 'granted') handle = rememberedHandle;
+    }
+    if (!handle) handle = await showDirectoryPicker({ mode: 'readwrite' });
+    await rememberVault(handle);
+    rememberedHandle = null;
+    await loadVault(handle);
+  } catch (error) {
+    if (error.name !== 'AbortError') toast(`${error.name}: ${error.message}`, true);
+  }
+}
+
+async function loadVault(handle) {
+  if (dirty) await saveCurrent();
+  vault = new Vault(handle);
+  if (await vault.permission(true) !== 'granted') throw new Error('沒有筆記庫的讀寫權限');
+  $('vaultState').textContent = '正在讀取…';
+  await vault.scan();
+  $('vaultName').textContent = vault.name;
+  $('vaultState').textContent = '本機筆記庫';
+  $('openVaultText').textContent = '更換筆記庫';
+  $('settingsVault').textContent = vault.name;
+  localStorage.setItem('mysyncnote-vault-name', vault.name);
+  await rebuildIndex();
+  renderTree();
+  if (tabs.length) {
+    tabs = tabs.filter(path => vault.node(path));
+    if (tabs.length) await openPath(tabs[0], false);
+    else showView('welcome');
+  } else {
+    const first = vault.markdownNodes()[0] || vault.canvasNodes()[0];
+    if (first) await openPath(first.path);
+    else showView('welcome');
+  }
+  renderTabs();
+  toast(`已開啟筆記庫「${vault.name}」`);
+}
+
+async function rebuildIndex() {
+  if (!vault) return;
+  const entries = [];
+  for (const node of vault.markdownNodes()) {
+    try { entries.push({ path: node.path, content: await vault.readText(node.path), modified: node.lastModified }); }
+    catch (error) { console.warn('索引失敗', node.path, error); }
+  }
+  index = buildIndex(entries);
+  renderRightPanel();
+}
+
+function scheduleIndex() {
+  clearTimeout(indexingTimer);
+  indexingTimer = setTimeout(rebuildIndex, 450);
+}
+
+function treeMatches(node, query) {
+  if (!query) return true;
+  if (node.path.toLowerCase().includes(query)) return true;
+  if (node.kind === 'file' && node.ext === 'md') return index?.byPath.get(node.path)?.content.toLowerCase().includes(query);
+  return node.children?.some(child => treeMatches(child, query));
+}
+
+function renderTree() {
+  const tree = $('fileTree');
+  tree.innerHTML = '';
+  if (!vault) { tree.innerHTML = '<div class="panel-empty">開啟筆記庫後會在這裡顯示資料夾與筆記</div>'; return; }
+  const query = $('fileSearch').value.trim().toLowerCase();
+  const root = vault.node('');
+  for (const node of root.children) appendTreeNode(node, tree, 0, query);
+  if (!tree.children.length) tree.innerHTML = `<div class="panel-empty">${query ? '找不到符合的筆記' : '這個筆記庫目前是空的'}</div>`;
+}
+
+function appendTreeNode(node, parent, depth, query) {
+  if (!treeMatches(node, query)) return;
+  const row = document.createElement('div');
+  row.className = `tree-row${node.path === selectedPath || node.path === currentPath ? ' active' : ''}`;
+  row.style.paddingLeft = `${6 + depth * 16}px`;
+  row.dataset.path = node.path; row.draggable = true; row.setAttribute('role', 'treeitem');
+  const toggle = document.createElement('span'); toggle.className = 'tree-toggle';
+  toggle.textContent = node.kind === 'directory' ? (expanded.has(node.path) || query ? '▾' : '▸') : '';
+  const icon = document.createElement('span'); icon.className = 'tree-icon';
+  icon.textContent = node.kind === 'directory' ? (expanded.has(node.path) || query ? '▾' : '▸') : node.ext === 'canvas' ? '◇' : node.ext === 'md' ? '▤' : '·';
+  const label = document.createElement('span'); label.className = 'tree-label'; label.textContent = node.name.replace(/\.(md|canvas)$/i, '');
+  row.append(toggle, icon, label);
+  row.onclick = async event => {
+    event.stopPropagation(); selectedPath = node.path;
+    if (node.kind === 'directory') {
+      expanded.has(node.path) ? expanded.delete(node.path) : expanded.add(node.path);
+      persistSettings(); renderTree();
+    } else await openPath(node.path);
+    hideMobilePanels();
+  };
+  row.ondblclick = event => { event.preventDefault(); renamePath(node.path); };
+  row.oncontextmenu = event => { event.preventDefault(); selectedPath = node.path; renderTree(); showNodeMenu(node, event.clientX, event.clientY); };
+  let longPress;
+  row.addEventListener('pointerdown', event => { if (event.pointerType !== 'mouse') longPress = setTimeout(() => showNodeMenu(node, event.clientX, event.clientY), 600); });
+  ['pointerup', 'pointercancel', 'pointermove'].forEach(type => row.addEventListener(type, () => clearTimeout(longPress)));
+  row.ondragstart = event => { event.dataTransfer.setData('text/mysyncnote-path', node.path); event.dataTransfer.effectAllowed = 'move'; };
+  if (node.kind === 'directory') {
+    row.ondragover = event => { event.preventDefault(); row.classList.add('drop-target'); };
+    row.ondragleave = () => row.classList.remove('drop-target');
+    row.ondrop = async event => {
+      event.preventDefault(); row.classList.remove('drop-target');
+      const source = event.dataTransfer.getData('text/mysyncnote-path');
+      if (!source || source === node.path) return;
+      await movePath(source, node.path);
+    };
+  }
+  parent.append(row);
+  if (node.kind === 'directory' && (expanded.has(node.path) || query)) for (const child of node.children) appendTreeNode(child, parent, depth + 1, query);
+}
+
+function showMenu(items, x, y) {
+  const menu = $('contextMenu'); menu.innerHTML = '';
+  for (const item of items) {
+    if (item === 'separator') { const hr = document.createElement('hr'); hr.style.borderColor = 'var(--line)'; menu.append(hr); continue; }
+    const button = document.createElement('button'); button.className = item.danger ? 'menu-danger' : '';
+    button.innerHTML = `<span></span>${item.shortcut ? `<small>${item.shortcut}</small>` : ''}`; button.firstChild.textContent = item.label;
+    button.onclick = () => { menu.classList.add('hidden'); item.action(); };
+    menu.append(button);
+  }
+  menu.classList.remove('hidden');
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.min(x, innerWidth - rect.width - 8)}px`; menu.style.top = `${Math.min(y, innerHeight - rect.height - 8)}px`;
+}
+
+function showNodeMenu(node, x, y) {
+  const items = [];
+  if (node.kind === 'directory') items.push(
+    { label: '在這裡新增筆記', action: () => createNote(node.path) },
+    { label: '新增子資料夾', action: () => createFolder(node.path) },
+    { label: '在這裡新增 Canvas', action: () => createCanvas(node.path) }, 'separator'
+  );
+  else items.push({ label: '開啟', action: () => openPath(node.path) }, 'separator');
+  items.push(
+    { label: '重新命名', shortcut: 'F2', action: () => renamePath(node.path) },
+    { label: '移動到…', action: () => chooseMoveDestination(node.path) },
+    { label: '在檔案總管中顯示', action: () => { expanded.add(node.parentPath); selectedPath = node.path; renderTree(); } },
+    'separator', { label: '刪除', shortcut: 'Delete', danger: true, action: () => deletePath(node.path) }
+  );
+  showMenu(items, x, y);
+}
+
+async function createNote(parentPath = selectedFolder()) {
+  if (!vault) return openVaultPicker();
+  const value = await ask('新增筆記', '未命名筆記', `建立位置：${parentPath || '筆記庫根目錄'}`);
+  if (!value) return;
+  try {
+    const node = await vault.createNote(parentPath, value);
+    expanded.add(parentPath); selectedPath = node.path; await rebuildIndex(); renderTree(); await openPath(node.path); $('documentTitle').focus(); $('documentTitle').select();
+  } catch (error) { toast(error.message, true); }
+}
+
+async function createFolder(parentPath = selectedFolder()) {
+  if (!vault) return openVaultPicker();
+  const value = await ask('新增資料夾', '新資料夾', `建立位置：${parentPath || '筆記庫根目錄'}`);
+  if (!value) return;
+  try { const node = await vault.createFolder(parentPath, value); expanded.add(parentPath); expanded.add(node.path); selectedPath = node.path; renderTree(); }
+  catch (error) { toast(error.message, true); }
+}
+
+async function createCanvas(parentPath = selectedFolder()) {
+  if (!vault) return openVaultPicker();
+  const value = await ask('新增 Canvas', '未命名 Canvas', `建立位置：${parentPath || '筆記庫根目錄'}`);
+  if (!value) return;
+  try { const node = await vault.createCanvas(parentPath, value); expanded.add(parentPath); selectedPath = node.path; renderTree(); await openPath(node.path); }
+  catch (error) { toast(error.message, true); }
+}
+
+async function renamePath(path, explicitName = null) {
+  if (!vault) return;
+  const node = vault.node(path); if (!node) return;
+  const extension = node.kind === 'file' ? `.${node.ext}` : '';
+  const initial = node.kind === 'file' ? node.name.slice(0, -extension.length) : node.name;
+  const value = explicitName ?? await ask(`重新命名${node.kind === 'directory' ? '資料夾' : '檔案'}`, initial, 'F2 只是快捷鍵；平常可用右鍵、長按或直接修改筆記標題。');
+  if (!value || safeName(value, extension) === node.name) return;
+  const oldStem = noteStem(node.name), newName = safeName(value, extension), newStem = noteStem(newName);
+  try {
+    if (path === currentPath && dirty) await saveCurrent();
+    const target = await vault.rename(path, newName);
+    if (node.kind === 'file' && node.ext === 'md' && settings.updateLinks) await updateLinksAfterRename(oldStem, newStem);
+    tabs = tabs.map(tab => tab === path ? target : tab.startsWith(`${path}/`) ? `${target}${tab.slice(path.length)}` : tab);
+    if (currentPath === path || currentPath.startsWith(`${path}/`)) currentPath = `${target}${currentPath.slice(path.length)}`;
+    selectedPath = target;
+    await rebuildIndex(); renderTree(); renderTabs();
+    if (currentPath === target) { $('documentTitle').value = noteStem(target); $('breadcrumbs').textContent = target; loadedModified = vault.node(target)?.lastModified; }
+    toast(`已重新命名為「${basename(target)}」`);
+  } catch (error) { toast(error.message, true); }
+}
+
+async function updateLinksAfterRename(oldStem, newStem) {
+  for (const node of vault.markdownNodes()) {
+    const content = await vault.readText(node.path);
+    const replaced = replaceWikiTarget(content, oldStem, newStem);
+    if (replaced !== content) await vault.writeText(node.path, replaced);
+  }
+}
+
+async function chooseMoveDestination(path) {
+  const folders = [...vault.nodes.values()].filter(node => node.kind === 'directory' && node.path !== path && !node.path.startsWith(`${path}/`)).map(node => node.path);
+  const destination = await chooseFromList('移動到', folders, item => item || '筆記庫根目錄', '選擇目的資料夾…');
+  if (destination == null) return;
+  await movePath(path, destination);
+}
+
+async function movePath(path, destination) {
+  try {
+    if (path === currentPath && dirty) await saveCurrent();
+    const target = await vault.move(path, destination);
+    tabs = tabs.map(tab => tab === path ? target : tab.startsWith(`${path}/`) ? `${target}${tab.slice(path.length)}` : tab);
+    if (currentPath === path || currentPath.startsWith(`${path}/`)) currentPath = `${target}${currentPath.slice(path.length)}`;
+    selectedPath = target; expanded.add(destination); await rebuildIndex(); renderTree(); renderTabs(); toast(`已移動到「${destination || vault.name}」`);
+  } catch (error) { toast(error.message, true); }
+}
+
+async function deletePath(path) {
+  const node = vault?.node(path); if (!node) return;
+  if (!await confirmAction(`刪除「${node.name}」？`, settings.trashMode === 'trash' ? '項目會移到筆記庫的 .trash 資料夾。' : '這會直接永久刪除，無法復原。', '刪除')) return;
+  try {
+    await vault.remove(path, settings.trashMode === 'trash');
+    tabs = tabs.filter(tab => tab !== path && !tab.startsWith(`${path}/`));
+    if (currentPath === path || currentPath.startsWith(`${path}/`)) { currentPath = ''; currentType = ''; showView('welcome'); }
+    selectedPath = ''; await rebuildIndex(); renderTree(); renderTabs(); toast('已刪除');
+  } catch (error) { toast(error.message, true); }
+}
+
+async function openPath(path, addHistory = true) {
+  if (!vault) return;
+  const node = vault.node(path); if (!node || node.kind !== 'file') return;
+  if (dirty && currentPath !== path) await saveCurrent();
+  selectedPath = path; currentPath = path; currentType = node.ext; loadedModified = node.lastModified; dirty = false;
+  if (!tabs.includes(path)) tabs.push(path);
+  sessionStorage.setItem('mysyncnote-tabs', JSON.stringify(tabs));
+  if (addHistory && history[historyIndex] !== path) { history = history.slice(0, historyIndex + 1); history.push(path); historyIndex = history.length - 1; }
+  if (node.ext === 'md') {
+    const content = await vault.readText(path, true);
+    $('editor').value = content; $('documentTitle').value = noteStem(path); showView('note'); applyViewMode(); renderPreview(); renderRightPanel();
+  } else if (node.ext === 'canvas') {
+    const content = await vault.readText(path, true); canvasView.load(content); $('canvasTitle').textContent = noteStem(path); showView('canvas');
+  } else {
+    const blob = await vault.readBlob(path); window.open(URL.createObjectURL(blob), '_blank');
+  }
+  $('breadcrumbs').textContent = path; setSaveState('已儲存'); renderTree(); renderTabs(); updateHistoryButtons(); hideMobilePanels();
+}
+
+function renderTabs() {
+  const container = $('tabs'); container.innerHTML = '';
+  for (const path of tabs) {
+    if (!vault?.node(path)) continue;
+    const tab = document.createElement('button'); tab.className = `tab${path === currentPath ? ' active' : ''}`; tab.role = 'tab';
+    const icon = vault.node(path)?.ext === 'canvas' ? '◇' : '▤';
+    tab.innerHTML = `<span>${icon}</span><span class="tab-label"></span><span class="tab-close">×</span>`;
+    tab.querySelector('.tab-label').textContent = basename(path).replace(/\.(md|canvas)$/i, '');
+    tab.onclick = event => { if (event.target.closest('.tab-close')) closeTab(path); else openPath(path); };
+    container.append(tab);
+  }
+}
+
+async function closeTab(path) {
+  if (path === currentPath && dirty) await saveCurrent();
+  const indexOf = tabs.indexOf(path); tabs = tabs.filter(tab => tab !== path); sessionStorage.setItem('mysyncnote-tabs', JSON.stringify(tabs));
+  if (path === currentPath) { const next = tabs[Math.min(indexOf, tabs.length - 1)]; if (next) await openPath(next, false); else { currentPath = ''; showView('welcome'); } }
+  renderTabs();
+}
+
+function updateHistoryButtons() { $('goBack').disabled = historyIndex <= 0; $('goForward').disabled = historyIndex < 0 || historyIndex >= history.length - 1; }
+
+function applyViewMode() {
+  $('editorArea').className = `editor-area mode-${viewMode}`;
+  document.querySelectorAll('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === viewMode));
+}
+
+function scheduleSave() {
+  dirty = true; setSaveState('尚未儲存');
+  clearTimeout(autoSaveTimer);
+  if (settings.autoSave && vault) autoSaveTimer = setTimeout(() => saveCurrent(true), 800);
+}
+
+async function saveCurrent(silent = false) {
+  if (!vault || !currentPath || !dirty) return;
+  clearTimeout(autoSaveTimer);
+  const pathAtStart = currentPath;
+  const text = currentType === 'canvas' ? canvasView.json() : $('editor').value;
+  const expected = loadedModified;
+  setSaveState('正在儲存…');
+  saveChain = saveChain.then(async () => {
+    try {
+      const modified = await vault.writeText(pathAtStart, text, expected);
+      if (currentPath === pathAtStart) { loadedModified = modified; dirty = false; setSaveState('已儲存'); }
+      scheduleIndex();
+      if (!silent) toast('已儲存');
+    } catch (error) {
+      if (error.name === 'ExternalChangeError') await resolveConflict(pathAtStart, text, error);
+      else { setSaveState('儲存失敗', true); toast(error.message, true); }
+    }
+  });
+  return saveChain;
+}
+
+async function resolveConflict(path, localText, error) {
+  $('confirmTitle').textContent = '偵測到外部修改';
+  $('confirmMessage').textContent = 'FolderSync 或其他程式已經修改這份筆記。請選擇要保留哪個版本。';
+  $('confirmOk').textContent = '保留目前版本'; $('confirmOk').className = 'danger';
+  $('confirmExtra').innerHTML = '<div class="dialog-actions" style="justify-content:flex-start"><button type="button" data-choice="external">載入外部版本</button><button type="button" data-choice="both">兩份都保留</button></div>';
+  $('confirmDialog').showModal();
+  $('confirmExtra').querySelectorAll('button').forEach(button => button.onclick = () => { $('confirmDialog').returnValue = button.dataset.choice; $('confirmDialog').close(); });
+  const choice = await new Promise(resolve => $('confirmDialog').addEventListener('close', () => resolve($('confirmDialog').returnValue), { once: true }));
+  if (choice === 'default') {
+    loadedModified = await vault.writeText(path, localText, null); dirty = false; setSaveState('已儲存'); toast('已保留目前版本');
+  } else if (choice === 'external') {
+    $('editor').value = error.externalText; vault.contents.set(path, error.externalText); loadedModified = error.externalModified; dirty = false; renderPreview(); setSaveState('已載入外部版本');
+  } else if (choice === 'both') {
+    const folder = dirname(path); const desired = `${noteStem(path)}（衝突 ${new Date().toLocaleString('zh-TW').replace(/[/:]/g, '-')}）.md`;
+    const name = await vault.uniqueName(folder, desired); await vault.writeText(`${folder ? `${folder}/` : ''}${name}`, localText);
+    $('editor').value = error.externalText; vault.contents.set(path, error.externalText); loadedModified = error.externalModified; dirty = false; await vault.scan(); await rebuildIndex(); renderTree(); renderPreview(); setSaveState('已保留兩份'); toast(`目前內容另存為「${name}」`);
+  } else setSaveState('尚未儲存', true);
+}
+
+function renderPreview() {
+  if (currentType !== 'md') return;
+  for (const url of objectUrls) URL.revokeObjectURL(url); objectUrls = [];
+  const source = $('editor').value;
+  const context = {
+    resolveWiki: target => index?.resolve(target, currentPath),
+    embedWiki: target => {
+      const resolved = index?.resolve(target, currentPath);
+      if (resolved) return { html: `<strong>${noteStem(resolved.path)}</strong><p>${renderMarkdown(resolved.content, { resolveWiki: t => index?.resolve(t, resolved.path) })}</p>` };
+      const asset = resolveAsset(target);
+      if (asset) return { type: 'image', path: asset.path };
+      return null;
+    }
+  };
+  $('preview').innerHTML = renderMarkdown(source, context);
+  $('preview').querySelectorAll('[data-wikilink]').forEach(link => link.addEventListener('click', async () => {
+    const target = index?.resolve(link.dataset.wikilink, currentPath);
+    if (target) { await openPath(target.path); if (link.dataset.heading) requestAnimationFrame(() => document.getElementById(link.dataset.heading.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-'))?.scrollIntoView()); }
+    else if (await confirmAction('建立缺少的筆記？', `「${link.dataset.wikilink}」目前不存在。`, '建立', false)) { const parent = selectedFolder(); const node = await vault.createNote(parent, link.dataset.wikilink); await rebuildIndex(); renderTree(); await openPath(node.path); }
+  }));
+  $('preview').querySelectorAll('[data-file-link]').forEach(link => link.addEventListener('click', () => { const node = resolveAsset(link.dataset.fileLink); if (node) openPath(node.path); }));
+  $('preview').querySelectorAll('[data-vault-image]').forEach(async image => {
+    const node = resolveAsset(image.dataset.vaultImage); if (!node) return;
+    try { const blob = await vault.readBlob(node.path); const url = URL.createObjectURL(blob); objectUrls.push(url); image.src = url; } catch { image.alt += '（無法讀取）'; }
+  });
+  $('preview').querySelectorAll('[data-tag]').forEach(tag => tag.addEventListener('click', () => { $('fileSearch').value = `#${tag.dataset.tag}`; renderTree(); }));
+}
+
+function resolveAsset(target) {
+  const clean = decodeURIComponent(target).replace(/\\/g, '/');
+  const relative = `${dirname(currentPath)}/${clean}`.replace(/^\//, '');
+  return vault?.node(relative) || vault?.node(clean) || [...(vault?.nodes.values() || [])].find(node => node.kind === 'file' && node.name.toLowerCase() === basename(clean).toLowerCase());
+}
+
+function renderRightPanel() {
+  const panel = $('rightPanel'); panel.innerHTML = '';
+  if (!currentPath || currentType !== 'md') { panel.innerHTML = '<div class="panel-empty">開啟 Markdown 筆記後顯示資訊</div>'; return; }
+  const source = $('editor').value;
+  if (rightPanel === 'outline') {
+    const headings = extractHeadings(source);
+    if (!headings.length) panel.innerHTML = '<div class="panel-empty">這篇筆記沒有標題</div>';
+    headings.forEach(heading => { const button = document.createElement('button'); button.className = `outline-item level-${Math.min(heading.level, 3)}`; button.textContent = heading.text; button.onclick = () => { const lines = $('editor').value.split('\n'); const offset = lines.slice(0, heading.line).join('\n').length + (heading.line ? 1 : 0); $('editor').focus(); $('editor').setSelectionRange(offset, offset + lines[heading.line].length); }; panel.append(button); });
+  } else if (rightPanel === 'backlinks') {
+    const links = index?.backlinks.get(currentPath) || [];
+    if (!links.length) panel.innerHTML = '<div class="panel-empty">目前沒有其他筆記連到這裡</div>';
+    links.forEach(item => appendPanelLink(panel, item.source, noteStem(item.source)));
+    const unlinked = findUnlinkedMentions();
+    if (unlinked.length) { const title = document.createElement('div'); title.className = 'panel-section-title'; title.textContent = '未連結提及'; panel.append(title); unlinked.forEach(path => appendPanelLink(panel, path, noteStem(path))); }
+  } else if (rightPanel === 'links') {
+    const links = extractLinks(source);
+    const wiki = links.filter(link => link.type !== 'external'); const external = links.filter(link => link.type === 'external');
+    const title1 = document.createElement('div'); title1.className = 'panel-section-title'; title1.textContent = '筆記連結'; panel.append(title1);
+    wiki.forEach(link => { const target = index?.resolve(link.target, currentPath); appendPanelLink(panel, target?.path, link.target, !target); });
+    const title2 = document.createElement('div'); title2.className = 'panel-section-title'; title2.textContent = '網頁連結'; panel.append(title2);
+    external.forEach(link => { const a = document.createElement('a'); a.className = 'link-item'; a.href = link.target; a.target = '_blank'; a.rel = 'noopener'; a.textContent = link.label || link.target; panel.append(a); });
+    if (!links.length) panel.innerHTML = '<div class="panel-empty">這篇筆記沒有連結</div>';
+  } else {
+    const front = parseFrontmatter(source).properties;
+    const tags = extractTags(source);
+    const rows = { ...front, tags: tags.join(', ') || '—', path: currentPath, modified: new Date(vault.node(currentPath)?.lastModified || Date.now()).toLocaleString('zh-TW') };
+    Object.entries(rows).forEach(([key, value]) => { const row = document.createElement('div'); row.className = 'property-row'; row.innerHTML = '<b></b><span></span>'; row.firstChild.textContent = key; row.lastChild.textContent = Array.isArray(value) ? value.join(', ') : value; panel.append(row); });
+  }
+}
+
+function appendPanelLink(panel, path, label, broken = false) {
+  const button = document.createElement('button'); button.className = `link-item${broken ? ' broken-link' : ''}`; button.textContent = label;
+  button.onclick = () => path && openPath(path); panel.append(button);
+}
+
+function findUnlinkedMentions() {
+  if (!index) return [];
+  const stem = noteStem(currentPath).toLowerCase();
+  return index.entries.filter(entry => entry.path !== currentPath && entry.content.toLowerCase().includes(stem) && !entry.links.some(link => link.target.toLowerCase() === stem)).map(entry => entry.path);
+}
+
+function formatSelection(type) {
+  const editor = $('editor'); const start = editor.selectionStart, end = editor.selectionEnd; const selected = editor.value.slice(start, end); let before = '', after = '', replacement = selected;
+  const lineStart = editor.value.lastIndexOf('\n', start - 1) + 1;
+  switch (type) {
+    case 'heading': before = '## '; break; case 'bold': before = '**'; after = '**'; break; case 'italic': before = '*'; after = '*'; break; case 'strike': before = '~~'; after = '~~'; break; case 'highlight': before = '=='; after = '=='; break;
+    case 'link': before = '['; after = '](https://)'; break; case 'wikilink': before = '[['; after = ']]'; break; case 'code': before = selected.includes('\n') ? '```\n' : '`'; after = selected.includes('\n') ? '\n```' : '`'; break;
+    case 'quote': editor.setSelectionRange(lineStart, end); replacement = editor.value.slice(lineStart, end).split('\n').map(line => `> ${line}`).join('\n'); editor.setRangeText(replacement, lineStart, end, 'select'); editor.dispatchEvent(new Event('input')); return;
+    case 'list': editor.setSelectionRange(lineStart, end); replacement = editor.value.slice(lineStart, end).split('\n').map(line => `- ${line}`).join('\n'); editor.setRangeText(replacement, lineStart, end, 'select'); editor.dispatchEvent(new Event('input')); return;
+    case 'task': editor.setSelectionRange(lineStart, end); replacement = editor.value.slice(lineStart, end).split('\n').map(line => `- [ ] ${line}`).join('\n'); editor.setRangeText(replacement, lineStart, end, 'select'); editor.dispatchEvent(new Event('input')); return;
+  }
+  editor.setRangeText(`${before}${replacement}${after}`, start, end, 'end'); editor.focus(); editor.dispatchEvent(new Event('input'));
+}
+
+function updateWikiSuggest() {
+  const editor = $('editor'); const before = editor.value.slice(0, editor.selectionStart); const match = before.match(/\[\[([^\]\n]*)$/); const box = $('wikiSuggest');
+  if (!match || !index) { box.classList.add('hidden'); return; }
+  const query = match[1].toLowerCase(); const candidates = index.entries.filter(entry => noteStem(entry.path).toLowerCase().includes(query) && entry.path !== currentPath).slice(0, 12);
+  box.innerHTML = '';
+  candidates.forEach(entry => { const button = document.createElement('button'); button.type = 'button'; button.className = 'suggestion'; button.innerHTML = '<span></span><small></small>'; button.firstChild.textContent = noteStem(entry.path); button.lastChild.textContent = dirname(entry.path); button.onmousedown = event => { event.preventDefault(); const start = editor.selectionStart - match[1].length; editor.setRangeText(`${noteStem(entry.path)}]]`, start, editor.selectionStart, 'end'); box.classList.add('hidden'); editor.dispatchEvent(new Event('input')); }; box.append(button); });
+  box.classList.toggle('hidden', !candidates.length);
+}
+
+async function importPastedImage(event) {
+  if (!vault || currentType !== 'md') return;
+  const file = [...event.clipboardData.files].find(item => item.type.startsWith('image/'));
+  if (!file) return;
+  event.preventDefault();
+  await importAttachments([file]);
+}
+
+async function importAttachments(files) {
+  if (!vault || currentType !== 'md' || !files.length) return;
+  const folder = settings.attachmentFolder.trim().replace(/^\/|\/$/g, '');
+  let parentPath = '';
+  for (const part of folder.split('/').filter(Boolean)) { const next = `${parentPath ? `${parentPath}/` : ''}${safeName(part)}`; if (!vault.node(next)) await vault.createFolder(parentPath, part); parentPath = next; }
+  const normalized = files.map((file, index) => {
+    if (file.name && file.name !== 'image.png') return file;
+    const extension = file.name?.includes('.') ? `.${file.name.split('.').pop()}` : `.${file.type.split('/')[1] || 'png'}`;
+    return new File([file], `圖片 ${new Date().toISOString().replace(/[:.]/g, '-')}${index ? ` ${index + 1}` : ''}${extension}`, { type: file.type });
+  });
+  const paths = await vault.importFiles(parentPath, normalized);
+  const markdown = paths.map((path, index) => normalized[index].type.startsWith('image/') ? `![[${path}]]` : `[${normalized[index].name}](${path})`).join('\n');
+  $('editor').setRangeText(markdown, $('editor').selectionStart, $('editor').selectionEnd, 'end'); $('editor').dispatchEvent(new Event('input')); renderTree();
+}
+
+function openGraph() {
+  if (!index) return toast('請先開啟筆記庫');
+  showView('graph'); updateGraph();
+}
+
+function updateGraph() {
+  graph.setData(index, { scope: $('graphScope').value, currentPath, depth: Number($('graphDepth').value), filter: $('graphFilter').value, isolates: $('graphIsolates').classList.contains('active') });
+  $('graphSummary').textContent = `${graph.nodes.length} 篇筆記 · ${graph.edges.length} 條連結`;
+}
+
+function closeSpecialView() { if (currentPath) showView(currentType === 'canvas' ? 'canvas' : 'note'); else showView('welcome'); }
+
+const graph = new GraphView($('graphCanvas'), path => openPath(path));
+const canvasView = new CanvasView({
+  viewport: $('canvasViewport'), surface: $('canvasSurface'), nodesLayer: $('canvasNodes'), edgesLayer: $('canvasEdges'),
+  onChange: () => { scheduleSave(); setSaveState('尚未儲存'); }, onOpenNote: path => openPath(path),
+  chooseNote: async () => {
+    if (!index?.entries.length) return null;
+    const entry = await chooseFromList('選擇筆記', index.entries, item => item.path, '選擇要放入 Canvas 的筆記…'); return entry?.path || null;
+  }
+});
+
+function openCommandPalette() {
+  const commands = [
+    { label: '新增筆記', hint: 'Ctrl N', run: () => createNote() }, { label: '新增資料夾', run: () => createFolder() }, { label: '新增 Canvas', run: () => createCanvas() },
+    { label: '關聯圖譜', hint: 'Ctrl G', run: openGraph }, { label: '重新讀取筆記庫', run: refreshVault }, { label: '設定', run: openSettings }
+  ];
+  $('commandSearch').placeholder = '輸入指令或筆記名稱…'; $('commandSearch').value = ''; $('commandDialog').showModal();
+  const render = () => {
+    const q = $('commandSearch').value.toLowerCase(); $('commandResults').innerHTML = '';
+    const rows = [...commands.map(item => ({ ...item, kind: '指令' })), ...(index?.entries || []).map(entry => ({ label: noteStem(entry.path), hint: dirname(entry.path), kind: '筆記', run: () => openPath(entry.path) }))].filter(item => `${item.label} ${item.hint || ''}`.toLowerCase().includes(q)).slice(0, 60);
+    rows.forEach(item => { const button = document.createElement('button'); button.type = 'button'; button.className = 'command-result'; button.innerHTML = '<span></span><span></span><small></small>'; button.children[0].textContent = item.kind === '筆記' ? '▤' : '›'; button.children[1].textContent = item.label; button.children[2].textContent = item.hint || item.kind; button.onclick = () => { $('commandDialog').close(); item.run(); }; $('commandResults').append(button); });
+  };
+  const listener = render; $('commandSearch').addEventListener('input', listener); render(); setTimeout(() => $('commandSearch').focus(), 0);
+  $('commandDialog').addEventListener('close', () => $('commandSearch').removeEventListener('input', listener), { once: true });
+}
+
+async function refreshVault() {
+  if (!vault) return;
+  if (dirty) await saveCurrent(true);
+  const previousModified = currentPath ? vault.node(currentPath)?.lastModified : null;
+  await vault.scan(); await rebuildIndex(); renderTree();
+  const current = vault.node(currentPath);
+  if (current && previousModified && current.lastModified !== previousModified && !dirty) await openPath(currentPath, false);
+  if (!current && currentPath) { tabs = tabs.filter(path => path !== currentPath); currentPath = ''; showView('welcome'); renderTabs(); }
+  toast('已重新讀取筆記庫');
+}
+
+function openSettings() {
+  $('settingsVault').textContent = vault?.name || '尚未選擇'; $('attachmentFolder').value = settings.attachmentFolder; $('trashMode').value = settings.trashMode; $('updateLinks').checked = settings.updateLinks; $('autoSave').checked = settings.autoSave; $('settingsDialog').showModal();
+}
+
+// Main controls
+$('openVault').onclick = openVaultPicker; $('welcomeOpen').onclick = openVaultPicker; $('settingsChangeVault').onclick = openVaultPicker;
+$('newNote').onclick = () => createNote(); $('newFolder').onclick = () => createFolder(); $('newCanvas').onclick = () => createCanvas(); $('refreshVault').onclick = refreshVault;
+$('fileSearch').oninput = renderTree; $('fileSearch').onkeydown = event => { if (event.key === 'Escape') { event.currentTarget.value = ''; renderTree(); } };
+$('collapseLeft').onclick = () => { app.classList.add('left-collapsed'); app.classList.remove('left-open'); $('showLeft').classList.remove('hidden'); };
+$('showLeft').onclick = () => { if (innerWidth <= 760) app.classList.add('left-open'); else { app.classList.remove('left-collapsed'); $('showLeft').classList.add('hidden'); } };
+$('leftScrim').onclick = hideMobilePanels;
+$('collapseRight').onclick = () => { app.classList.add('right-collapsed'); app.classList.remove('right-open'); };
+$('toggleRight').onclick = () => { if (innerWidth <= 1050) app.classList.toggle('right-open'); else app.classList.toggle('right-collapsed'); };
+$('openSettings').onclick = openSettings;
+$('vaultMenu').onclick = event => showMenu([{ label: vault ? '更換筆記庫' : '開啟筆記庫', action: openVaultPicker }, { label: '重新讀取', action: refreshVault }, { label: '設定', action: openSettings }], event.clientX, event.clientY);
+$('explorerMore').onclick = event => showMenu([{ label: '依名稱排序', action: renderTree }, { label: '全部展開', action: () => { vault && [...vault.nodes.values()].filter(n => n.kind === 'directory').forEach(n => expanded.add(n.path)); persistSettings(); renderTree(); } }, { label: '全部收合', action: () => { expanded.clear(); persistSettings(); renderTree(); } }], event.clientX, event.clientY);
+document.addEventListener('pointerdown', event => { if (!event.target.closest('#contextMenu,[data-menu-anchor]')) $('contextMenu').classList.add('hidden'); });
+
+$('editor').addEventListener('input', () => { scheduleSave(); if (viewMode !== 'edit') renderPreview(); renderRightPanel(); updateWikiSuggest(); });
+$('editor').addEventListener('keyup', updateWikiSuggest); $('editor').addEventListener('click', updateWikiSuggest); $('editor').addEventListener('paste', importPastedImage);
+$('editor').addEventListener('dragover', event => { if (event.dataTransfer?.files?.length) event.preventDefault(); });
+$('editor').addEventListener('drop', event => { if (!event.dataTransfer?.files?.length) return; event.preventDefault(); importAttachments([...event.dataTransfer.files]); });
+document.querySelectorAll('[data-format]').forEach(button => button.onclick = () => formatSelection(button.dataset.format));
+document.querySelectorAll('[data-view]').forEach(button => button.onclick = () => { viewMode = button.dataset.view; localStorage.setItem('mysyncnote-view', viewMode); applyViewMode(); renderPreview(); });
+$('documentTitle').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); } if (event.key === 'Escape') { event.currentTarget.value = noteStem(currentPath); event.currentTarget.blur(); } });
+$('documentTitle').addEventListener('change', () => renamePath(currentPath, $('documentTitle').value));
+$('documentMore').onclick = event => { const node = vault?.node(currentPath); if (node) showNodeMenu(node, event.clientX, event.clientY); };
+
+document.querySelectorAll('[data-panel]').forEach(button => button.onclick = () => { rightPanel = button.dataset.panel; document.querySelectorAll('[data-panel]').forEach(item => item.classList.toggle('active', item === button)); renderRightPanel(); });
+$('goBack').onclick = () => { if (historyIndex > 0) openPath(history[--historyIndex], false).then(updateHistoryButtons); };
+$('goForward').onclick = () => { if (historyIndex < history.length - 1) openPath(history[++historyIndex], false).then(updateHistoryButtons); };
+$('openGraph').onclick = openGraph; $('closeGraph').onclick = closeSpecialView; $('graphScope').onchange = updateGraph; $('graphDepth').oninput = updateGraph; $('graphFilter').oninput = updateGraph; $('graphIsolates').onclick = () => { $('graphIsolates').classList.toggle('active'); updateGraph(); };
+$('canvasAddText').onclick = () => canvasView.addText(); $('canvasAddNote').onclick = () => canvasView.addNote(); $('canvasAddGroup').onclick = () => canvasView.addGroup(); $('canvasFit').onclick = () => canvasView.fit(); $('canvasConnect').onclick = () => { const on = canvasView.toggleConnect(); $('canvasConnect').classList.toggle('primary', on); $('canvasConnect').textContent = on ? '請選兩個節點' : '連接節點'; }; $('closeCanvas').onclick = () => closeTab(currentPath);
+
+$('attachmentFolder').onchange = () => { settings.attachmentFolder = $('attachmentFolder').value.trim() || 'attachments'; persistSettings(); };
+$('trashMode').onchange = () => { settings.trashMode = $('trashMode').value; persistSettings(); };
+$('updateLinks').onchange = () => { settings.updateLinks = $('updateLinks').checked; persistSettings(); };
+$('autoSave').onchange = () => { settings.autoSave = $('autoSave').checked; persistSettings(); };
+
+addEventListener('keydown', event => {
+  const ctrl = event.ctrlKey || event.metaKey;
+  if (ctrl && event.key.toLowerCase() === 's') { event.preventDefault(); saveCurrent(); }
+  if (ctrl && event.key.toLowerCase() === 'p') { event.preventDefault(); openCommandPalette(); }
+  if (ctrl && event.key.toLowerCase() === 'k') { event.preventDefault(); $('fileSearch').focus(); }
+  if (ctrl && event.key.toLowerCase() === 'n') { event.preventDefault(); createNote(); }
+  if (ctrl && event.key.toLowerCase() === 'g') { event.preventDefault(); openGraph(); }
+  if (event.key === 'F2' && selectedPath && !event.target.matches('input,textarea')) { event.preventDefault(); renamePath(selectedPath); }
+  if (event.key === 'Delete' && selectedPath && currentView !== 'canvas' && !event.target.matches('input,textarea,[contenteditable]')) { event.preventDefault(); deletePath(selectedPath); }
+  if (event.key === 'Escape') { hideMobilePanels(); $('contextMenu').classList.add('hidden'); $('wikiSuggest').classList.add('hidden'); }
+});
+
+addEventListener('beforeunload', event => { if (dirty) { event.preventDefault(); event.returnValue = ''; } });
+document.addEventListener('visibilitychange', () => { if (document.hidden && dirty) saveCurrent(true); else if (!document.hidden && vault && !dirty) refreshVault(); });
+addEventListener('focus', () => { if (vault && !dirty && document.visibilityState === 'visible') refreshVault(); });
+
+async function restore() {
+  renderTree(); applyViewMode();
+  rememberedHandle = await recalledVault();
+  if (!rememberedHandle) return;
+  try {
+    const permission = await rememberedHandle.queryPermission({ mode: 'readwrite' });
+    if (permission === 'granted') { const handle = rememberedHandle; rememberedHandle = null; await loadVault(handle); }
+    else { $('vaultName').textContent = rememberedHandle.name; $('vaultState').textContent = '點一下重新連線'; $('openVaultText').textContent = `重新連線「${rememberedHandle.name}」`; }
+  } catch (error) { console.warn('無法還原筆記庫', error); }
+}
+
+if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('./sw.js').catch(console.warn);
+restore();
