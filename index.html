@@ -32,7 +32,7 @@
       <label class="search-box">
         <span>⌕</span>
         <input id="fileSearch" type="search" placeholder="搜尋檔名或內容" autocomplete="off">
-        <kbd>Ctrl K</kbd>
+        <kbd id="fileSearchShortcut">Ctrl+K</kbd>
       </label>
       <div id="fileTree" class="file-tree" role="tree"></div>
       <footer class="sidebar-footer">
@@ -101,10 +101,10 @@
         <div id="editorArea" class="editor-area mode-edit">
           <div class="source-pane">
             <textarea id="editor" aria-label="Markdown 編輯器" spellcheck="true"></textarea>
-            <div id="wikiSuggest" class="suggestions hidden"></div>
           </div>
           <div id="liveEditor" class="live-editor markdown-body"></div>
           <article id="preview" class="markdown-body"></article>
+          <div id="wikiSuggest" class="suggestions hidden"></div>
         </div>
       </section>
 

@@ -96,6 +96,7 @@ export class Vault {
   }
 
   async permission(request = false) {
+    if (typeof this.handle.queryPermission !== 'function') return 'granted';
     const options = { mode: 'readwrite' };
     let state = await this.handle.queryPermission(options);
     if (state !== 'granted' && request) state = await this.handle.requestPermission(options);

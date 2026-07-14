@@ -43,6 +43,7 @@ const expanded = new Set(JSON.parse(localStorage.getItem('mysyncnote-expanded') 
 function persistSettings() {
   localStorage.setItem('mysyncnote-preferences', JSON.stringify(settings));
   localStorage.setItem('mysyncnote-expanded', JSON.stringify([...expanded]));
+  updateShortcutHints();
   scheduleSettingsFileWrite();
 }
 
@@ -84,6 +85,7 @@ async function loadSettingsFile(handle) {
     for (const key of Object.keys(DEFAULT_SHORTCUTS)) if (typeof settings.shortcuts[key] !== 'string') settings.shortcuts[key] = '';
     localStorage.setItem('mysyncnote-preferences', JSON.stringify(settings));
     settingsFolderHandle = handle;
+    updateShortcutHints();
     $('settingsFileLocation').textContent = `${handle.name}/${name}`;
     return true;
   } catch (error) {
@@ -139,12 +141,13 @@ function initPaneLayout() {
   if (paneLayoutReady) return;
   const dock = $('workspaceDock');
   paneParking = document.createElement('div'); paneParking.className = 'pane-parking hidden';
+  const graphWorkspace = $('graphWorkspace');
   const primary = createPaneSlot('primary');
   primary.append($('noteWorkspace'), $('canvasWorkspace'));
+  paneParking.append(graphWorkspace);
   paneLayoutTree = primary;
   dock.innerHTML = '';
   dock.append(paneLayoutTree, paneParking);
-  paneParking.append($('graphWorkspace'));
   activePaneSlot = primary; primary.classList.add('active-pane-slot');
   paneLayoutReady = true;
 }
@@ -250,11 +253,13 @@ function detachPaneSlot(slot, parkContents = true) {
     const children = [...parent.children].filter(child => !child.classList.contains('pane-resizer'));
     if (children.length === 1) {
       const only = children[0], grand = parent.parentElement;
+      only.style.flex = ''; only.style.flexBasis = '';
       if (parent === paneLayoutTree) { $('workspaceDock').replaceChild(only, parent); paneLayoutTree = only; }
       else grand.replaceChild(only, parent);
     } else refreshSplitters(parent);
   }
   activePaneSlot = document.querySelector('.pane-slot[data-pane-key="primary"]'); setActivePaneSlot(activePaneSlot);
+  if (paneLayoutTree?.classList.contains('pane-slot')) { paneLayoutTree.style.flex = ''; paneLayoutTree.style.flexBasis = ''; }
   persistVaultState();
 }
 
@@ -298,6 +303,7 @@ function restorePaneLayout(model) {
     $('workspaceDock').replaceChild(split, tree); split.append(tree, slot); refreshSplitters(split); paneLayoutTree = split;
   }
   setActivePaneSlot(paneLayoutTree.querySelector?.('.pane-slot') || paneLayoutTree);
+  if (paneLayoutTree?.classList.contains('pane-slot')) { paneLayoutTree.style.flex = ''; paneLayoutTree.style.flexBasis = ''; }
 }
 
 async function ask(title, value = '', help = '') {
@@ -391,7 +397,7 @@ async function loadVault(handle) {
     viewMode = previous.viewMode;
     localStorage.setItem('mysyncnote-view', viewMode);
   }
-  selectedPath = vault.node(previous.selectedPath) ? previous.selectedPath : '';
+  selectedPath = vault.node(previous.selectedPath) && !isHiddenAppFile(vault.node(previous.selectedPath)) ? previous.selectedPath : '';
   tabs = (previous.tabs || []).filter(path => vault.node(path));
   secondaryPanePaths = (previous.secondaryPanePaths || []).filter(path => vault.node(path)?.ext === 'md');
   graphDocked = Boolean(previous.graphDocked);
@@ -434,10 +440,17 @@ function scheduleIndex() {
 }
 
 function treeMatches(node, query) {
+  if (isHiddenAppFile(node)) return false;
   if (!query) return true;
   if (node.path.toLowerCase().includes(query)) return true;
   if (node.kind === 'file' && node.ext === 'md') return index?.byPath.get(node.path)?.content.toLowerCase().includes(query);
   return node.children?.some(child => treeMatches(child, query));
+}
+
+function isHiddenAppFile(node) {
+  if (!node || node.kind !== 'file') return false;
+  const name = node.name.toLowerCase();
+  return name === 'mysyncnote-settings.json' || name === safeName(settings.settingsFileName || 'mysyncnote-settings.json', '.json').toLowerCase();
 }
 
 function renderTree() {
@@ -451,9 +464,10 @@ function renderTree() {
 }
 
 function appendTreeNode(node, parent, depth, query) {
+  if (isHiddenAppFile(node)) return;
   if (!treeMatches(node, query)) return;
   const row = document.createElement('div');
-  row.className = `tree-row${node.path === selectedPath || node.path === currentPath ? ' active' : ''}`;
+  row.className = `tree-row${node.path === selectedPath ? ' active' : ''}`;
   row.style.paddingLeft = `${6 + depth * 16}px`;
   row.dataset.path = node.path; row.draggable = true; row.setAttribute('role', 'treeitem');
   const toggle = document.createElement('span'); toggle.className = 'tree-toggle';
@@ -618,7 +632,7 @@ async function openPath(path, addHistory = true) {
   if (addHistory && history[historyIndex] !== path) { history = history.slice(0, historyIndex + 1); history.push(path); historyIndex = history.length - 1; }
   if (node.ext === 'md') {
     const content = await vault.readText(path, true);
-    $('editor').value = content; liveEditor.setValue(content); $('documentTitle').value = noteStem(path); showView('note'); applyViewMode(); renderPreview(); renderRightPanel();
+    $('editor').value = content; liveEditor.setValue(content); $('wikiSuggest').classList.add('hidden'); $('documentTitle').value = noteStem(path); showView('note'); applyViewMode(); renderPreview(); renderRightPanel();
   } else if (node.ext === 'canvas') {
     const content = await vault.readText(path, true); canvasView.load(content); $('canvasTitle').textContent = noteStem(path); showView('canvas');
   } else {
@@ -665,17 +679,18 @@ async function addSecondaryPane(path, direction = 'right', targetSlot = activePa
   }
   const node = vault.node(path);
   const content = await vault.readText(path, true);
-  const pane = { path, modified: node.lastModified, dirty: false, timer: null, mode: 'edit', objectUrls: [] };
+  const pane = { path, modified: node.lastModified, dirty: false, timer: null, mode: 'live', objectUrls: [] };
   const element = document.createElement('section');
   element.className = 'dock-pane secondary-note-pane'; element.dataset.path = path;
-  element.innerHTML = `<header class="secondary-pane-header" draggable="true"><span class="tree-icon">▤</span><span class="secondary-pane-title"></span><span class="secondary-pane-state">已儲存</span><button class="pane-mode" title="切換混合／原始碼／並排／閱讀">混合</button><button class="pane-primary icon-btn" title="在主要窗格開啟">↗</button><button class="pane-close icon-btn" title="關閉窗格">×</button></header><div class="secondary-pane-body live"><textarea class="secondary-pane-editor" spellcheck="true"></textarea><div class="secondary-pane-live markdown-body"></div><article class="secondary-pane-preview markdown-body"></article></div>`;
-  pane.element = element; pane.editor = element.querySelector('.secondary-pane-editor'); pane.preview = element.querySelector('.secondary-pane-preview'); pane.state = element.querySelector('.secondary-pane-state'); pane.body = element.querySelector('.secondary-pane-body'); pane.mode = 'live';
-  element.querySelector('.secondary-pane-title').textContent = path;
+  element.innerHTML = `<header class="document-header secondary-pane-document-header"><div class="document-title-row secondary-pane-drag" draggable="true"><span class="tree-icon">▤</span><span class="secondary-pane-title"></span><span class="secondary-pane-state">已儲存</span><button class="pane-primary icon-btn" title="在主要窗格開啟">↗</button><button class="pane-close icon-btn" title="關閉窗格">×</button></div><div class="editor-toolbar secondary-editor-toolbar"><button data-pane-format="heading" title="標題">H</button><button data-pane-format="bold" title="粗體"><b>B</b></button><button data-pane-format="italic" title="斜體"><i>I</i></button><button data-pane-format="strike" title="刪除線"><s>S</s></button><button data-pane-format="highlight" title="醒目標記">螢</button><span class="tool-separator"></span><button data-pane-format="link" title="連結">鏈</button><button data-pane-format="wikilink" title="Wiki 連結">[[]]</button><button data-pane-format="code" title="程式碼">&lt;/&gt;</button><button data-pane-format="quote" title="引用">❝</button><button data-pane-format="list" title="清單">☷</button><button data-pane-format="task" title="待辦事項">☑</button><span class="tool-spacer"></span><div class="view-switch pane-view-switch"><button data-pane-view="live" class="active">混合</button><button data-pane-view="edit">原始碼</button><button data-pane-view="split">並排</button><button data-pane-view="read">閱讀</button></div></div></header><div class="secondary-pane-body live"><textarea class="secondary-pane-editor" spellcheck="true"></textarea><div class="secondary-pane-live live-editor"></div><article class="secondary-pane-preview markdown-body"></article><div class="secondary-wiki-suggest suggestions hidden"></div></div>`;
+  pane.element = element; pane.editor = element.querySelector('.secondary-pane-editor'); pane.preview = element.querySelector('.secondary-pane-preview'); pane.state = element.querySelector('.secondary-pane-state'); pane.body = element.querySelector('.secondary-pane-body'); pane.suggest = element.querySelector('.secondary-wiki-suggest');
+  element.querySelector('.secondary-pane-title').textContent = noteStem(path);
   pane.editor.value = content;
-  const render = () => {
+  pane.render = () => {
     pane.objectUrls.forEach(URL.revokeObjectURL); pane.objectUrls = [];
     pane.preview.innerHTML = renderMarkdown(pane.editor.value, { resolveWiki: target => index?.resolve(target, pane.path) });
-    pane.preview.querySelectorAll('[data-wikilink]').forEach(link => link.onclick = () => { const target = index?.resolve(link.dataset.wikilink, pane.path); if (target) openPath(target.path); });
+    pane.preview.querySelectorAll('[data-wikilink]').forEach(link => link.onclick = () => { const target = index?.resolve(link.dataset.wikilink, pane.path); if (target) openPathInSecondaryPane(pane, target.path); });
+    pane.preview.querySelectorAll('[data-file-link]').forEach(link => link.onclick = () => { const target = resolveAsset(link.dataset.fileLink, pane.path); if (target?.ext === 'md') openPathInSecondaryPane(pane, target.path); else if (target) openPath(target.path); });
     pane.preview.querySelectorAll('[data-vault-image]').forEach(async image => { const asset = resolveAsset(image.dataset.vaultImage, pane.path); if (!asset) return; const url = URL.createObjectURL(await vault.readBlob(asset.path)); pane.objectUrls.push(url); image.src = url; });
   };
   pane.save = async () => {
@@ -692,23 +707,41 @@ async function addSecondaryPane(path, direction = 'right', targetSlot = activePa
       } else toast(`「${pane.path}」尚未儲存`, true);
     }
   };
-  const markPaneDirty = () => { pane.dirty = true; pane.state.textContent = '尚未儲存'; if (pane.mode === 'split' || pane.mode === 'read') render(); clearTimeout(pane.timer); if (settings.autoSave) pane.timer = setTimeout(pane.save, 800); };
-  pane.live = new LiveMarkdownEditor(element.querySelector('.secondary-pane-live'), { renderBlock: source => renderMarkdown(source, { resolveWiki: target => index?.resolve(target, pane.path) }), onChange: source => { pane.editor.value = source; markPaneDirty(); }, onLink: target => { const resolved = index?.resolve(target, pane.path); if (resolved) openPath(resolved.path); } });
+  pane.markDirty = () => { pane.dirty = true; pane.state.textContent = '尚未儲存'; if (pane.mode === 'split' || pane.mode === 'read') pane.render(); clearTimeout(pane.timer); if (settings.autoSave) pane.timer = setTimeout(pane.save, 800); };
+  pane.live = new LiveMarkdownEditor(element.querySelector('.secondary-pane-live'), {
+    onChange: source => { pane.editor.value = source; pane.markDirty(); }, onCursor: () => updatePaneWikiSuggest(pane),
+    onLink: target => { const resolved = index?.resolve(target, pane.path); if (resolved) openPathInSecondaryPane(pane, resolved.path); },
+    onFileLink: target => { if (/^https?:\/\//i.test(target)) window.open(target, '_blank', 'noopener'); else { const resolved = resolveAsset(target, pane.path); if (resolved?.ext === 'md') openPathInSecondaryPane(pane, resolved.path); } },
+    onPasteFiles: files => importAttachments(files, liveSurface(pane.live))
+  });
   pane.live.setValue(content);
-  pane.editor.oninput = markPaneDirty;
+  pane.editor.oninput = () => { pane.markDirty(); updatePaneWikiSuggest(pane); };
+  pane.editor.onkeyup = () => updatePaneWikiSuggest(pane); pane.editor.onclick = () => updatePaneWikiSuggest(pane);
   pane.editor.onkeydown = event => { if (eventMatchesShortcut(event, settings.shortcuts.save)) { event.preventDefault(); event.stopPropagation(); pane.save(); } };
-  element.querySelector('.pane-mode').onclick = event => {
-    pane.mode = pane.mode === 'live' ? 'edit' : pane.mode === 'edit' ? 'split' : pane.mode === 'split' ? 'read' : 'live';
-    pane.body.className = `secondary-pane-body ${pane.mode}`; event.currentTarget.textContent = pane.mode === 'live' ? '混合' : pane.mode === 'edit' ? '原始碼' : pane.mode === 'split' ? '並排' : '閱讀'; if (pane.mode === 'live') pane.live.setValue(pane.editor.value); else render();
-  };
+  const setMode = mode => { pane.mode = mode; pane.body.className = `secondary-pane-body ${mode}`; element.querySelectorAll('[data-pane-view]').forEach(button => button.classList.toggle('active', button.dataset.paneView === mode)); if (mode === 'live') pane.live.setValue(pane.editor.value); else pane.render(); pane.suggest.classList.add('hidden'); };
+  element.querySelectorAll('[data-pane-view]').forEach(button => button.onclick = () => setMode(button.dataset.paneView));
+  element.querySelectorAll('[data-pane-format]').forEach(button => button.onclick = () => applyFormat(button.dataset.paneFormat, pane.mode === 'live' ? liveSurface(pane.live) : textareaSurface(pane.editor, pane.markDirty)));
   element.querySelector('.pane-primary').onclick = () => openPath(pane.path);
   element.querySelector('.pane-close').onclick = () => closeSecondaryPane(pane.path);
-  const header = element.querySelector('.secondary-pane-header');
+  const header = element.querySelector('.secondary-pane-drag');
   header.ondragstart = event => { event.dataTransfer.setData('text/mysyncnote-pane', pane.path); event.dataTransfer.effectAllowed = 'move'; };
   secondaryPanes.set(path, pane);
   insertPane(element, `note:${path}`, direction, targetSlot);
-  secondaryPanePaths = [...secondaryPanes.keys()]; persistSecondaryOrder(); render();
+  secondaryPanePaths = [...secondaryPanes.keys()]; persistSecondaryOrder(); pane.render();
   showView(currentView === 'welcome' ? (currentPath ? (currentType === 'canvas' ? 'canvas' : 'note') : 'welcome') : currentView);
+}
+
+async function openPathInSecondaryPane(pane, path) {
+  const node = vault?.node(path); if (!pane || !node || node.ext !== 'md') return;
+  const duplicate = secondaryPanes.get(path);
+  if (duplicate && duplicate !== pane) { setActivePaneSlot(duplicate.element.closest('.pane-slot')); duplicate.element.focus(); return; }
+  if (pane.dirty) await pane.save();
+  const oldPath = pane.path, content = await vault.readText(path, true); secondaryPanes.delete(oldPath);
+  pane.path = path; pane.modified = node.lastModified; pane.dirty = false; pane.editor.value = content; pane.live.setValue(content); pane.state.textContent = '已儲存'; pane.suggest.classList.add('hidden');
+  pane.element.dataset.path = path; pane.element.querySelector('.secondary-pane-title').textContent = noteStem(path);
+  const slot = pane.element.closest('.pane-slot'); if (slot) slot.dataset.paneKey = `note:${path}`;
+  secondaryPanes.set(path, pane); selectedPath = path; for (let parent = dirname(path); parent; parent = dirname(parent)) expanded.add(parent);
+  pane.render(); renderTree(); persistSecondaryOrder();
 }
 
 async function closeSecondaryPane(path, save = true) {
@@ -734,7 +767,7 @@ async function restoreSecondaryPanes() {
 function remapSecondaryPath(oldPath, newPath) {
   const changes = [...secondaryPanes.values()].filter(pane => pane.path === oldPath || pane.path.startsWith(`${oldPath}/`));
   for (const pane of changes) {
-    secondaryPanes.delete(pane.path); pane.path = `${newPath}${pane.path.slice(oldPath.length)}`; pane.element.dataset.path = pane.path; pane.element.querySelector('.secondary-pane-title').textContent = pane.path; secondaryPanes.set(pane.path, pane);
+    secondaryPanes.delete(pane.path); pane.path = `${newPath}${pane.path.slice(oldPath.length)}`; pane.element.dataset.path = pane.path; pane.element.querySelector('.secondary-pane-title').textContent = noteStem(pane.path); secondaryPanes.set(pane.path, pane);
   }
   persistSecondaryOrder();
 }
@@ -757,6 +790,7 @@ function applyViewMode() {
   $('editorArea').className = `editor-area mode-${viewMode}`;
   document.querySelectorAll('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === viewMode));
   if (viewMode === 'live') liveEditor.setValue($('editor').value);
+  else $('wikiSuggest').classList.add('hidden');
 }
 
 function scheduleSave() {
@@ -848,7 +882,7 @@ function renderRightPanel() {
   if (rightPanel === 'outline') {
     const headings = extractHeadings(source);
     if (!headings.length) panel.innerHTML = '<div class="panel-empty">這篇筆記沒有標題</div>';
-    headings.forEach(heading => { const button = document.createElement('button'); button.className = `outline-item level-${Math.min(heading.level, 3)}`; button.textContent = heading.text; button.onclick = () => { const lines = $('editor').value.split('\n'); const offset = lines.slice(0, heading.line).join('\n').length + (heading.line ? 1 : 0); $('editor').focus(); $('editor').setSelectionRange(offset, offset + lines[heading.line].length); }; panel.append(button); });
+    headings.forEach(heading => { const button = document.createElement('button'); button.className = `outline-item level-${Math.min(heading.level, 3)}`; button.textContent = heading.text; button.onclick = () => { const lines = $('editor').value.split('\n'); const offset = lines.slice(0, heading.line).join('\n').length + (heading.line ? 1 : 0); if (viewMode === 'live') { liveEditor.focus(); liveEditor.setSelectionRange(offset, offset + lines[heading.line].length); } else { $('editor').focus(); $('editor').setSelectionRange(offset, offset + lines[heading.line].length); } }; panel.append(button); });
   } else if (rightPanel === 'backlinks') {
     const links = index?.backlinks.get(currentPath) || [];
     if (!links.length) panel.innerHTML = '<div class="panel-empty">目前沒有其他筆記連到這裡</div>';
@@ -882,41 +916,57 @@ function findUnlinkedMentions() {
   return index.entries.filter(entry => entry.path !== currentPath && entry.content.toLowerCase().includes(stem) && !entry.links.some(link => link.target.toLowerCase() === stem)).map(entry => entry.path);
 }
 
-function formatSelection(type) {
-  if (viewMode === 'live' && !liveEditor.activeTextarea()) liveEditor.activate(Math.max(0, liveEditor.blocks.length - 1));
-  const editor = viewMode === 'live' ? liveEditor.activeTextarea() : $('editor');
-  if (!editor) return;
-  const start = editor.selectionStart, end = editor.selectionEnd; const selected = editor.value.slice(start, end); let before = '', after = '', replacement = selected;
-  const lineStart = editor.value.lastIndexOf('\n', start - 1) + 1;
+function textareaSurface(editor, notify = () => editor.dispatchEvent(new Event('input'))) {
+  return {
+    value: () => editor.value, selection: () => ({ start: editor.selectionStart, end: editor.selectionEnd, text: editor.value.slice(editor.selectionStart, editor.selectionEnd) }),
+    replace: (start, end, text, mode = 'end') => { editor.setRangeText(text, start, end, mode); notify(); },
+    select: (start, end = start) => editor.setSelectionRange(start, end), focus: () => editor.focus(), focused: () => document.activeElement === editor
+  };
+}
+
+function liveSurface(editor) {
+  return { value: () => editor.value(), selection: () => editor.getSelection(), replace: (start, end, text, mode = 'end') => editor.replaceRange(start, end, text, mode), select: (start, end = start) => editor.setSelectionRange(start, end), focus: () => editor.focus(), focused: () => editor.isFocused() };
+}
+
+function applyFormat(type, surface) {
+  if (!surface) return;
+  const value = surface.value(), { start, end, text: selected } = surface.selection(); let before = '', after = '', replacement = selected;
+  const lineStart = value.lastIndexOf('\n', start - 1) + 1;
   switch (type) {
     case 'heading': before = '## '; break; case 'bold': before = '**'; after = '**'; break; case 'italic': before = '*'; after = '*'; break; case 'strike': before = '~~'; after = '~~'; break; case 'highlight': before = '=='; after = '=='; break;
     case 'link': before = '['; after = '](https://)'; break; case 'wikilink': before = '[['; after = ']]'; break; case 'code': before = selected.includes('\n') ? '```\n' : '`'; after = selected.includes('\n') ? '\n```' : '`'; break;
-    case 'quote': editor.setSelectionRange(lineStart, end); replacement = editor.value.slice(lineStart, end).split('\n').map(line => `> ${line}`).join('\n'); editor.setRangeText(replacement, lineStart, end, 'select'); editor.dispatchEvent(new Event('input')); return;
-    case 'list': editor.setSelectionRange(lineStart, end); replacement = editor.value.slice(lineStart, end).split('\n').map(line => `- ${line}`).join('\n'); editor.setRangeText(replacement, lineStart, end, 'select'); editor.dispatchEvent(new Event('input')); return;
-    case 'task': editor.setSelectionRange(lineStart, end); replacement = editor.value.slice(lineStart, end).split('\n').map(line => `- [ ] ${line}`).join('\n'); editor.setRangeText(replacement, lineStart, end, 'select'); editor.dispatchEvent(new Event('input')); return;
+    case 'quote': replacement = value.slice(lineStart, end).split('\n').map(line => `> ${line}`).join('\n'); surface.replace(lineStart, end, replacement, 'select'); return;
+    case 'list': replacement = value.slice(lineStart, end).split('\n').map(line => `- ${line}`).join('\n'); surface.replace(lineStart, end, replacement, 'select'); return;
+    case 'task': replacement = value.slice(lineStart, end).split('\n').map(line => `- [ ] ${line}`).join('\n'); surface.replace(lineStart, end, replacement, 'select'); return;
   }
-  editor.setRangeText(`${before}${replacement}${after}`, start, end, 'end'); editor.focus(); editor.dispatchEvent(new Event('input'));
+  surface.replace(start, end, `${before}${replacement}${after}`, 'end'); surface.focus();
 }
 
-function updateWikiSuggest() {
-  const editor = $('editor'); const before = editor.value.slice(0, editor.selectionStart); const match = before.match(/\[\[([^\]\n]*)$/); const box = $('wikiSuggest');
+function formatSelection(type) { applyFormat(type, viewMode === 'live' ? liveSurface(liveEditor) : textareaSurface($('editor'))); }
+
+function renderWikiSuggest(box, surface, fromPath) {
+  if (!surface?.focused()) { box.classList.add('hidden'); return; }
+  const value = surface.value(), { start: caret } = surface.selection(); const before = value.slice(0, caret); const match = before.match(/\[\[([^\]\n]*)$/);
   if (!match || !index) { box.classList.add('hidden'); return; }
-  const query = match[1].toLowerCase(); const candidates = index.entries.filter(entry => noteStem(entry.path).toLowerCase().includes(query) && entry.path !== currentPath).slice(0, 12);
+  const query = match[1].toLowerCase(); const candidates = index.entries.filter(entry => `${noteStem(entry.path)} ${entry.path}`.toLowerCase().includes(query) && entry.path !== fromPath).slice(0, 12);
   box.innerHTML = '';
-  candidates.forEach(entry => { const button = document.createElement('button'); button.type = 'button'; button.className = 'suggestion'; button.innerHTML = '<span></span><small></small>'; button.firstChild.textContent = noteStem(entry.path); button.lastChild.textContent = dirname(entry.path); button.onmousedown = event => { event.preventDefault(); const start = editor.selectionStart - match[1].length; editor.setRangeText(`${noteStem(entry.path)}]]`, start, editor.selectionStart, 'end'); box.classList.add('hidden'); editor.dispatchEvent(new Event('input')); }; box.append(button); });
+  candidates.forEach(entry => { const button = document.createElement('button'); button.type = 'button'; button.className = 'suggestion'; button.innerHTML = '<span></span><small></small>'; button.firstChild.textContent = noteStem(entry.path); button.lastChild.textContent = dirname(entry.path); button.onmousedown = event => { event.preventDefault(); surface.replace(caret - match[1].length, caret, `${noteStem(entry.path)}]]`); box.classList.add('hidden'); surface.focus(); }; box.append(button); });
   box.classList.toggle('hidden', !candidates.length);
 }
+
+function updateWikiSuggest() { renderWikiSuggest($('wikiSuggest'), viewMode === 'live' ? liveSurface(liveEditor) : textareaSurface($('editor')), currentPath); }
+function updatePaneWikiSuggest(pane) { renderWikiSuggest(pane.suggest, pane.mode === 'live' ? liveSurface(pane.live) : textareaSurface(pane.editor, pane.markDirty), pane.path); }
 
 async function importPastedImage(event) {
   if (!vault || currentType !== 'md') return;
   const file = [...event.clipboardData.files].find(item => item.type.startsWith('image/'));
   if (!file) return;
   event.preventDefault();
-  await importAttachments([file]);
+  await importAttachments([file], textareaSurface($('editor')));
 }
 
-async function importAttachments(files) {
-  if (!vault || currentType !== 'md' || !files.length) return;
+async function importAttachments(files, surface = null) {
+  if (!vault || !files.length) return;
   const folder = settings.attachmentFolder.trim().replace(/^\/|\/$/g, '');
   let parentPath = '';
   for (const part of folder.split('/').filter(Boolean)) { const next = `${parentPath ? `${parentPath}/` : ''}${safeName(part)}`; if (!vault.node(next)) await vault.createFolder(parentPath, part); parentPath = next; }
@@ -927,7 +977,8 @@ async function importAttachments(files) {
   });
   const paths = await vault.importFiles(parentPath, normalized);
   const markdown = paths.map((path, index) => normalized[index].type.startsWith('image/') ? `![[${path}]]` : `[${normalized[index].name}](${path})`).join('\n');
-  $('editor').setRangeText(markdown, $('editor').selectionStart, $('editor').selectionEnd, 'end'); $('editor').dispatchEvent(new Event('input')); renderTree();
+  surface ||= viewMode === 'live' ? liveSurface(liveEditor) : textareaSurface($('editor'));
+  const { start, end } = surface.selection(); surface.replace(start, end, markdown); renderTree();
 }
 
 function openGraph() {
@@ -955,12 +1006,13 @@ function updateGraph() {
 function closeSpecialView() { closeGraphDock(); }
 
 const liveEditor = new LiveMarkdownEditor($('liveEditor'), {
-  renderBlock: source => renderMarkdown(source, { resolveWiki: target => index?.resolve(target, currentPath) }),
-  onChange: source => { $('editor').value = source; scheduleSave(); renderRightPanel(); },
+  onChange: source => { $('editor').value = source; scheduleSave(); renderRightPanel(); }, onCursor: updateWikiSuggest,
   onLink: async (target, heading) => {
     const resolved = index?.resolve(target, currentPath);
     if (resolved) { await openPath(resolved.path); if (heading) requestAnimationFrame(() => document.getElementById(heading.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-'))?.scrollIntoView()); }
-  }
+  },
+  onFileLink: target => { if (/^https?:\/\//i.test(target)) window.open(target, '_blank', 'noopener'); else { const node = resolveAsset(target); if (node) openPath(node.path); } },
+  onPasteFiles: files => importAttachments(files, liveSurface(liveEditor))
 });
 
 const graph = new GraphView($('graphCanvas'), path => openPath(path));
@@ -1021,6 +1073,13 @@ function shortcutFromEvent(event) {
 function eventMatchesShortcut(event, shortcut) {
   if (!shortcut) return false;
   return shortcutFromEvent(event).toLowerCase() === shortcut.toLowerCase();
+}
+
+function updateShortcutHints() {
+  $('fileSearchShortcut').textContent = settings.shortcuts.search || '—';
+  $('fileSearch').title = settings.shortcuts.search ? `搜尋筆記庫（${settings.shortcuts.search}）` : '搜尋筆記庫';
+  $('openGraph').title = `開啟或關閉關聯圖譜${settings.shortcuts.graph ? `（${settings.shortcuts.graph}）` : ''}`;
+  $('splitCurrent').title = `選擇分割方向${settings.shortcuts.split ? `（${settings.shortcuts.split}）` : ''}`;
 }
 
 function renderShortcutSettings() {
@@ -1105,7 +1164,7 @@ $('attachmentFolder').onchange = () => { settings.attachmentFolder = $('attachme
 $('trashMode').onchange = () => { settings.trashMode = $('trashMode').value; persistSettings(); };
 $('updateLinks').onchange = () => { settings.updateLinks = $('updateLinks').checked; persistSettings(); };
 $('autoSave').onchange = () => { settings.autoSave = $('autoSave').checked; persistSettings(); };
-$('settingsFileName').onchange = () => { settings.settingsFileName = safeName($('settingsFileName').value, '.json'); $('settingsFileName').value = settings.settingsFileName; persistSettings(); };
+$('settingsFileName').onchange = () => { settings.settingsFileName = safeName($('settingsFileName').value, '.json'); $('settingsFileName').value = settings.settingsFileName; persistSettings(); renderTree(); };
 $('chooseSettingsFolder').onclick = chooseSettingsFolder;
 
 addEventListener('keydown', event => {
@@ -1142,7 +1201,7 @@ async function restore() {
   rememberedHandle = await recalledVault();
   if (!rememberedHandle) return;
   try {
-    const permission = await rememberedHandle.queryPermission({ mode: 'readwrite' });
+    const permission = typeof rememberedHandle.queryPermission === 'function' ? await rememberedHandle.queryPermission({ mode: 'readwrite' }) : 'granted';
     if (permission === 'granted') { const handle = rememberedHandle; rememberedHandle = null; await loadVault(handle); }
     else { $('vaultName').textContent = rememberedHandle.name; $('vaultState').textContent = '點一下重新連線'; $('openVaultText').textContent = `重新連線「${rememberedHandle.name}」`; }
   } catch (error) { console.warn('無法還原筆記庫', error); }
@@ -1150,4 +1209,5 @@ async function restore() {
 
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('./sw.js').catch(console.warn);
 initPaneLayout();
+updateShortcutHints();
 restore();

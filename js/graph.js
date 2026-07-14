@@ -165,7 +165,7 @@ export class GraphView {
       this.canvas.setPointerCapture(event.pointerId);
       const point = this.#point(event);
       const node = this.#hit(point);
-      this.drag = node ? { node, dx: point.x - node.x, dy: point.y - node.y, moved: false } : { pan: true, x: event.clientX, y: event.clientY, ox: this.offset.x, oy: this.offset.y, moved: false };
+      this.drag = node ? { node, dx: point.x - node.x, dy: point.y - node.y, x: event.clientX, y: event.clientY, moved: false } : { pan: true, x: event.clientX, y: event.clientY, ox: this.offset.x, oy: this.offset.y, moved: false };
       this.start();
     });
     this.canvas.addEventListener('pointermove', event => {
@@ -173,9 +173,12 @@ export class GraphView {
       this.hover = this.#hit(point);
       this.canvas.style.cursor = this.hover ? 'pointer' : this.drag?.pan ? 'grabbing' : 'grab';
       if (!this.drag) { this.draw(); return; }
+      const moved = Math.hypot(event.clientX - this.drag.x, event.clientY - this.drag.y) > 4;
       if (this.drag.node) {
+        if (!moved && !this.drag.moved) return;
         this.drag.node.x = point.x - this.drag.dx; this.drag.node.y = point.y - this.drag.dy; this.drag.node.vx = 0; this.drag.node.vy = 0; this.drag.moved = true;
       } else {
+        if (!moved && !this.drag.moved) return;
         this.offset.x = this.drag.ox + event.clientX - this.drag.x; this.offset.y = this.drag.oy + event.clientY - this.drag.y; this.drag.moved = true;
       }
       this.draw();
@@ -184,6 +187,7 @@ export class GraphView {
       if (this.drag?.node && !this.drag.moved && !this.drag.node.ghost) this.onOpen(this.drag.node.path);
       this.drag = null;
     });
+    this.canvas.addEventListener('pointercancel', () => { this.drag = null; });
     this.canvas.addEventListener('wheel', event => {
       event.preventDefault();
       const rect = this.canvas.getBoundingClientRect();
