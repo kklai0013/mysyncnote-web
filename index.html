@@ -46,42 +46,53 @@
 <script>
   const $=id=>document.getElementById(id);
   const demo={name:'歡迎使用 MySyncNote.md',content:'# 歡迎使用 MySyncNote\n\nMySyncNote 現在只編輯手機或電腦上的本機 Markdown 資料夾。\n\n## FolderSync 同步方式\n\n1. 在手機用 FolderSync 建立「Google Drive ↔ 手機本機資料夾」雙向同步。\n2. 在 MySyncNote 按「選擇同步資料夾」。\n3. 選擇 FolderSync 使用的同一個手機資料夾。\n4. MySyncNote 負責編輯，FolderSync 負責上傳及下載。\n\n- 按 `Ctrl+S` 儲存\n- 按 `F2` 重新命名\n- 按「預覽」查看 Markdown\n'};
-  let directory=null,notes=[{...demo,handle:null}],current=notes[0],dirty=false,previewing=false;
+  let directory=null,pendingFolder=null,notes=[{...demo,handle:null}],current=notes[0],dirty=false,previewing=false,autoSaveTimer=null,editVersion=0;
 
   const escape=s=>s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
   function markdown(source){let s=escape(source);s=s.replace(/^```([\s\S]*?)```$/gm,'<pre><code>$1</code></pre>').replace(/^### (.+)$/gm,'<h3>$1</h3>').replace(/^## (.+)$/gm,'<h2>$1</h2>').replace(/^# (.+)$/gm,'<h1>$1</h1>').replace(/^> (.+)$/gm,'<blockquote>$1</blockquote>').replace(/^[-*] (.+)$/gm,'<li>$1</li>').replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>').replace(/\n\n/g,'</p><p>').replace(/\n/g,'<br>');return '<p>'+s+'</p>'}
   function notify(text,error=false){$('notice').textContent=text;$('notice').className='notice'+(error?' error':'');clearTimeout(notify.timer);notify.timer=setTimeout(()=>$('notice').classList.add('hidden'),3500)}
+  function folderDb(){return new Promise((resolve,reject)=>{const request=indexedDB.open('mysyncnote-settings',1);request.onupgradeneeded=()=>request.result.createObjectStore('handles');request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error)})}
+  async function rememberFolder(handle){try{const db=await folderDb();await new Promise((resolve,reject)=>{const tx=db.transaction('handles','readwrite');tx.objectStore('handles').put(handle,'last-folder');tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error)});db.close()}catch{/* Some browsers cannot store file handles. */}}
+  async function readRememberedFolder(){try{const db=await folderDb();const handle=await new Promise((resolve,reject)=>{const request=db.transaction('handles').objectStore('handles').get('last-folder');request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error)});db.close();return handle}catch{return null}}
   function cleanName(name){name=name.trim().replace(/[\\/:*?"<>|]/g,'-');if(!name.toLowerCase().endsWith('.md'))name+='.md';return name||'未命名.md'}
   function renderList(){const q=$('search').value.toLowerCase();$('files').innerHTML='';notes.filter(n=>n.name.toLowerCase().includes(q)).forEach(n=>{const b=document.createElement('button');b.className='file'+(n===current?' active':'');b.innerHTML='<span>▤</span><span></span>';b.lastChild.textContent=n.name;b.onclick=()=>select(n);$('files').append(b)})}
   async function select(note){if(current&&dirty)await save();current=note;$('title').value=note.name.replace(/\.md$/i,'');$('content').value=note.content;dirty=false;updateState();renderList();renderPreview();$('sidebar').classList.remove('open')}
-  function updateState(){if(!current)return;$('saveState').textContent=directory?(dirty?'尚未儲存':'已儲存'):'示範模式';$('rename').disabled=!directory||!current.handle}
+  function updateState(){if(!current)return;$('saveState').textContent=directory?(dirty?'等待自動儲存…':'已儲存'):'示範模式';$('rename').disabled=!directory||!current.handle}
   function renderPreview(){$('preview').innerHTML=markdown($('content').value)}
+  function scheduleAutoSave(){if(!directory)return;clearTimeout(autoSaveTimer);$('saveState').textContent='等待自動儲存…';autoSaveTimer=setTimeout(()=>save(true),800)}
 
+  async function loadFolder(handle){
+    directory=handle;pendingFolder=null;notes=[];dirty=false;current=null;
+    for await(const entry of directory.values()){
+      if(entry.kind==='file'&&entry.name.toLowerCase().endsWith('.md')){const file=await entry.getFile();notes.push({name:entry.name,content:await file.text(),handle:entry})}
+    }
+    notes.sort((a,b)=>a.name.localeCompare(b.name,'zh-Hant'));
+    $('folderName').textContent=directory.name;$('modeBadge').textContent='FolderSync';$('storageHelp').textContent='已記住這個資料夾；重新開啟時會自動恢復。修改後約 0.8 秒自動儲存。';$('openFolder').textContent='更換同步資料夾';
+    if(notes.length)await select(notes[0]);else await createNote();renderList();notify(`已開啟 ${directory.name}`)
+  }
   async function openFolder(){
     if(!window.showDirectoryPicker){notify(`目前瀏覽器不能選擇資料夾（安全環境：${isSecureContext?'是':'否'}）`,true);return}
     try{
-      directory=await showDirectoryPicker({mode:'readwrite'});notes=[];
-      for await(const entry of directory.values()){
-        if(entry.kind==='file'&&entry.name.toLowerCase().endsWith('.md')){const file=await entry.getFile();notes.push({name:entry.name,content:await file.text(),handle:entry})}
-      }
-      notes.sort((a,b)=>a.name.localeCompare(b.name,'zh-Hant'));
-      $('folderName').textContent=directory.name;$('modeBadge').textContent='FolderSync';$('storageHelp').textContent='所有修改會寫入這個本機資料夾，再由 FolderSync 同步。';
-      if(notes.length)await select(notes[0]);else await createNote();renderList();notify(`已開啟 ${directory.name}`)
+      if(pendingFolder){const permission=await pendingFolder.requestPermission({mode:'readwrite'});if(permission==='granted'){const handle=pendingFolder;await rememberFolder(handle);await loadFolder(handle);return}}
+      const handle=await showDirectoryPicker({mode:'readwrite'});await rememberFolder(handle);await loadFolder(handle)
     }catch(e){if(e.name!=='AbortError')notify(`${e.name}: ${e.message}`,true)}
   }
-  async function createNote(){if(current&&dirty)await save();let base='未命名筆記',i=1,name=base+'.md';while(notes.some(n=>n.name===name))name=`${base} ${++i}.md`;let handle=null;if(directory)handle=await directory.getFileHandle(name,{create:true});const note={name,content:'# 未命名筆記\n\n開始寫作…\n',handle};notes.unshift(note);await select(note);dirty=true;updateState();$('title').focus();$('title').select()}
-  async function save(){if(!current)return;current.content=$('content').value;if(!directory){dirty=false;updateState();notify('示範模式不會永久儲存；請先選擇 FolderSync 的本機資料夾');return}try{if(!current.handle)current.handle=await directory.getFileHandle(current.name,{create:true});const out=await current.handle.createWritable();await out.write(current.content);await out.close();dirty=false;updateState();notify(`已儲存 ${current.name}`)}catch(e){notify(`${e.name}: ${e.message}`,true)}}
+  async function restoreFolder(){const handle=await readRememberedFolder();if(!handle)return;try{const permission=await handle.queryPermission({mode:'readwrite'});if(permission==='granted'){await loadFolder(handle)}else{pendingFolder=handle;$('folderName').textContent=handle.name;$('modeBadge').textContent='需要授權';$('storageHelp').textContent='瀏覽器記得上次的資料夾；按下方按鈕重新允許即可，不必重新尋找。';$('openFolder').textContent=`重新連接 ${handle.name}`}}catch{/* Keep demo mode if the saved handle is no longer valid. */}}
+  async function createNote(){if(current&&dirty)await save();let base='未命名筆記',i=1,name=base+'.md';while(notes.some(n=>n.name===name))name=`${base} ${++i}.md`;let handle=null;if(directory)handle=await directory.getFileHandle(name,{create:true});const note={name,content:'# 未命名筆記\n\n開始寫作…\n',handle};notes.unshift(note);await select(note);dirty=true;editVersion++;updateState();scheduleAutoSave();$('title').focus();$('title').select()}
+  async function save(silent=false){if(typeof silent!=='boolean')silent=false;if(!current)return;current.content=$('content').value;if(!directory){if(!silent)notify('示範模式不會永久儲存；請先選擇 FolderSync 的本機資料夾');return}const savingVersion=editVersion;try{if(!current.handle)current.handle=await directory.getFileHandle(current.name,{create:true});const out=await current.handle.createWritable();await out.write(current.content);await out.close();if(editVersion===savingVersion)dirty=false;updateState();if(!silent)notify(`已儲存 ${current.name}`);else $('saveState').textContent=dirty?'等待自動儲存…':'已自動儲存';if(dirty)scheduleAutoSave()}catch(e){notify(`${e.name}: ${e.message}`,true)}}
   async function rename(){if(!directory||!current?.handle)return;const next=cleanName($('title').value);if(next===current.name)return;try{const newHandle=await directory.getFileHandle(next,{create:true});const out=await newHandle.createWritable();await out.write($('content').value);await out.close();await directory.removeEntry(current.name);current.name=next;current.handle=newHandle;dirty=false;renderList();updateState();notify(`已改名為 ${next}`)}catch(e){notify(`${e.name}: ${e.message}`,true)}}
 
-  $('openFolder').onclick=openFolder;$('newNote').onclick=createNote;$('save').onclick=save;$('rename').onclick=rename;$('search').oninput=renderList;
-  $('content').oninput=()=>{dirty=true;current.content=$('content').value;updateState();if(previewing)renderPreview()};
+  $('openFolder').onclick=openFolder;$('newNote').onclick=createNote;$('save').onclick=()=>save(false);$('rename').onclick=rename;$('search').oninput=renderList;
+  $('content').oninput=()=>{dirty=true;editVersion++;current.content=$('content').value;updateState();scheduleAutoSave();if(previewing)renderPreview()};
   $('title').oninput=()=>{dirty=true;updateState()};$('title').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();rename()}};
   $('previewButton').onclick=()=>{previewing=!previewing;$('workspace').classList.toggle('previewing',previewing);$('previewButton').textContent=previewing?'編輯':'預覽';renderPreview()};
   $('menu').onclick=()=>$('sidebar').classList.toggle('open');
   addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){e.preventDefault();save()}if(e.key==='F2'){e.preventDefault();$('title').focus();$('title').select()}});
   addEventListener('beforeunload',e=>{if(dirty){e.preventDefault();e.returnValue=''}});
+  document.addEventListener('visibilitychange',()=>{if(document.hidden&&dirty&&directory)save(true)});
   $('content').value=current.content;renderList();renderPreview();updateState();
   if('serviceWorker' in navigator&&location.protocol.startsWith('http'))navigator.serviceWorker.register('./sw.js').catch(()=>{});
+  restoreFolder();
 </script>
 </body>
 </html>
