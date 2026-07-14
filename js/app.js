@@ -443,7 +443,10 @@ function treeMatches(node, query) {
   if (isHiddenAppFile(node)) return false;
   if (!query) return true;
   if (node.path.toLowerCase().includes(query)) return true;
-  if (node.kind === 'file' && node.ext === 'md') return index?.byPath.get(node.path)?.content.toLowerCase().includes(query);
+  if (node.kind === 'file' && node.ext === 'md') {
+    const draft = node.path === currentPath ? $('editor').value : secondaryPanes.get(node.path)?.editor.value;
+    return String(draft ?? index?.byPath.get(node.path)?.content ?? '').toLowerCase().includes(query);
+  }
   return node.children?.some(child => treeMatches(child, query));
 }
 
@@ -682,7 +685,7 @@ async function addSecondaryPane(path, direction = 'right', targetSlot = activePa
   const pane = { path, modified: node.lastModified, dirty: false, timer: null, mode: 'live', objectUrls: [] };
   const element = document.createElement('section');
   element.className = 'dock-pane secondary-note-pane'; element.dataset.path = path;
-  element.innerHTML = `<header class="document-header secondary-pane-document-header"><div class="document-title-row secondary-pane-drag" draggable="true"><span class="tree-icon">▤</span><span class="secondary-pane-title"></span><span class="secondary-pane-state">已儲存</span><button class="pane-primary icon-btn" title="在主要窗格開啟">↗</button><button class="pane-close icon-btn" title="關閉窗格">×</button></div><div class="editor-toolbar secondary-editor-toolbar"><button data-pane-format="heading" title="標題">H</button><button data-pane-format="bold" title="粗體"><b>B</b></button><button data-pane-format="italic" title="斜體"><i>I</i></button><button data-pane-format="strike" title="刪除線"><s>S</s></button><button data-pane-format="highlight" title="醒目標記">螢</button><span class="tool-separator"></span><button data-pane-format="link" title="連結">鏈</button><button data-pane-format="wikilink" title="Wiki 連結">[[]]</button><button data-pane-format="code" title="程式碼">&lt;/&gt;</button><button data-pane-format="quote" title="引用">❝</button><button data-pane-format="list" title="清單">☷</button><button data-pane-format="task" title="待辦事項">☑</button><span class="tool-spacer"></span><div class="view-switch pane-view-switch"><button data-pane-view="live" class="active">混合</button><button data-pane-view="edit">原始碼</button><button data-pane-view="split">並排</button><button data-pane-view="read">閱讀</button></div></div></header><div class="secondary-pane-body live"><textarea class="secondary-pane-editor" spellcheck="true"></textarea><div class="secondary-pane-live live-editor"></div><article class="secondary-pane-preview markdown-body"></article><div class="secondary-wiki-suggest suggestions hidden"></div></div>`;
+  element.innerHTML = `<header class="document-header secondary-pane-document-header"><div class="document-title-row secondary-pane-drag" draggable="true"><span class="tree-icon">▤</span><span class="secondary-pane-title"></span><span class="secondary-pane-state">已儲存</span><button class="pane-primary icon-btn" title="在主要窗格開啟">↗</button><button class="pane-close icon-btn" title="關閉窗格">×</button></div><div class="editor-toolbar secondary-editor-toolbar"><button data-pane-history="undo" title="復原（Ctrl+Z）" aria-label="復原">↶</button><button data-pane-history="redo" title="重做（Ctrl+Y）" aria-label="重做">↷</button><span class="tool-separator"></span><button data-pane-format="heading" title="標題">H</button><button data-pane-format="bold" title="粗體"><b>B</b></button><button data-pane-format="italic" title="斜體"><i>I</i></button><button data-pane-format="strike" title="刪除線"><s>S</s></button><button data-pane-format="highlight" title="醒目標記">螢</button><span class="tool-separator"></span><button data-pane-format="link" title="連結">鏈</button><button data-pane-format="wikilink" title="Wiki 連結">[[]]</button><button data-pane-format="code" title="程式碼">&lt;/&gt;</button><button data-pane-format="quote" title="引用">❝</button><button data-pane-format="list" title="清單">☷</button><button data-pane-format="task" title="待辦事項">☑</button><span class="tool-spacer"></span><div class="view-switch pane-view-switch"><button data-pane-view="live" class="active">混合</button><button data-pane-view="edit">原始碼</button><button data-pane-view="split">並排</button><button data-pane-view="read">閱讀</button></div></div></header><div class="secondary-pane-body live"><textarea class="secondary-pane-editor" spellcheck="true"></textarea><div class="secondary-pane-live live-editor"></div><article class="secondary-pane-preview markdown-body"></article><div class="secondary-wiki-suggest suggestions hidden"></div></div>`;
   pane.element = element; pane.editor = element.querySelector('.secondary-pane-editor'); pane.preview = element.querySelector('.secondary-pane-preview'); pane.state = element.querySelector('.secondary-pane-state'); pane.body = element.querySelector('.secondary-pane-body'); pane.suggest = element.querySelector('.secondary-wiki-suggest');
   element.querySelector('.secondary-pane-title').textContent = noteStem(path);
   pane.editor.value = content;
@@ -691,6 +694,7 @@ async function addSecondaryPane(path, direction = 'right', targetSlot = activePa
     pane.preview.innerHTML = renderMarkdown(pane.editor.value, { resolveWiki: target => index?.resolve(target, pane.path) });
     pane.preview.querySelectorAll('[data-wikilink]').forEach(link => link.onclick = () => { const target = index?.resolve(link.dataset.wikilink, pane.path); if (target) openPathInSecondaryPane(pane, target.path); });
     pane.preview.querySelectorAll('[data-file-link]').forEach(link => link.onclick = () => { const target = resolveAsset(link.dataset.fileLink, pane.path); if (target?.ext === 'md') openPathInSecondaryPane(pane, target.path); else if (target) openPath(target.path); });
+    pane.preview.querySelectorAll('[data-tag]').forEach(tag => tag.onclick = () => searchTag(tag.dataset.tag));
     pane.preview.querySelectorAll('[data-vault-image]').forEach(async image => { const asset = resolveAsset(image.dataset.vaultImage, pane.path); if (!asset) return; const url = URL.createObjectURL(await vault.readBlob(asset.path)); pane.objectUrls.push(url); image.src = url; });
   };
   pane.save = async () => {
@@ -712,14 +716,16 @@ async function addSecondaryPane(path, direction = 'right', targetSlot = activePa
     onChange: source => { pane.editor.value = source; pane.markDirty(); }, onCursor: () => updatePaneWikiSuggest(pane),
     onLink: target => { const resolved = index?.resolve(target, pane.path); if (resolved) openPathInSecondaryPane(pane, resolved.path); },
     onFileLink: target => { if (/^https?:\/\//i.test(target)) window.open(target, '_blank', 'noopener'); else { const resolved = resolveAsset(target, pane.path); if (resolved?.ext === 'md') openPathInSecondaryPane(pane, resolved.path); } },
+    onTag: searchTag,
     onPasteFiles: files => importAttachments(files, liveSurface(pane.live))
   });
   pane.live.setValue(content);
   pane.editor.oninput = () => { pane.markDirty(); updatePaneWikiSuggest(pane); };
   pane.editor.onkeyup = () => updatePaneWikiSuggest(pane); pane.editor.onclick = () => updatePaneWikiSuggest(pane);
   pane.editor.onkeydown = event => { if (eventMatchesShortcut(event, settings.shortcuts.save)) { event.preventDefault(); event.stopPropagation(); pane.save(); } };
-  const setMode = mode => { pane.mode = mode; pane.body.className = `secondary-pane-body ${mode}`; element.querySelectorAll('[data-pane-view]').forEach(button => button.classList.toggle('active', button.dataset.paneView === mode)); if (mode === 'live') pane.live.setValue(pane.editor.value); else pane.render(); pane.suggest.classList.add('hidden'); };
+  const setMode = mode => { pane.mode = mode; pane.body.className = `secondary-pane-body ${mode}`; element.querySelectorAll('[data-pane-view]').forEach(button => button.classList.toggle('active', button.dataset.paneView === mode)); if (mode === 'live') pane.live.setValue(pane.editor.value, pane.live.value() !== pane.editor.value); else pane.render(); pane.suggest.classList.add('hidden'); };
   element.querySelectorAll('[data-pane-view]').forEach(button => button.onclick = () => setMode(button.dataset.paneView));
+  element.querySelectorAll('[data-pane-history]').forEach(button => button.onclick = () => runEditorHistory(button.dataset.paneHistory, pane.mode, pane.live, pane.editor));
   element.querySelectorAll('[data-pane-format]').forEach(button => button.onclick = () => applyFormat(button.dataset.paneFormat, pane.mode === 'live' ? liveSurface(pane.live) : textareaSurface(pane.editor, pane.markDirty)));
   element.querySelector('.pane-primary').onclick = () => openPath(pane.path);
   element.querySelector('.pane-close').onclick = () => closeSecondaryPane(pane.path);
@@ -789,7 +795,7 @@ function updateHistoryButtons() { $('goBack').disabled = historyIndex <= 0; $('g
 function applyViewMode() {
   $('editorArea').className = `editor-area mode-${viewMode}`;
   document.querySelectorAll('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === viewMode));
-  if (viewMode === 'live') liveEditor.setValue($('editor').value);
+  if (viewMode === 'live') liveEditor.setValue($('editor').value, liveEditor.value() !== $('editor').value);
   else $('wikiSuggest').classList.add('hidden');
 }
 
@@ -866,7 +872,7 @@ function renderPreview() {
     const node = resolveAsset(image.dataset.vaultImage); if (!node) return;
     try { const blob = await vault.readBlob(node.path); const url = URL.createObjectURL(blob); objectUrls.push(url); image.src = url; } catch { image.alt += '（無法讀取）'; }
   });
-  $('preview').querySelectorAll('[data-tag]').forEach(tag => tag.addEventListener('click', () => { $('fileSearch').value = `#${tag.dataset.tag}`; renderTree(); }));
+  $('preview').querySelectorAll('[data-tag]').forEach(tag => tag.addEventListener('click', () => searchTag(tag.dataset.tag)));
 }
 
 function resolveAsset(target, fromPath = currentPath) {
@@ -928,6 +934,12 @@ function liveSurface(editor) {
   return { value: () => editor.value(), selection: () => editor.getSelection(), replace: (start, end, text, mode = 'end') => editor.replaceRange(start, end, text, mode), select: (start, end = start) => editor.setSelectionRange(start, end), focus: () => editor.focus(), focused: () => editor.isFocused() };
 }
 
+function runEditorHistory(action, mode, live, textarea) {
+  if (mode === 'live') { live[action]?.(); return; }
+  textarea.focus();
+  document.execCommand(action === 'undo' ? 'undo' : 'redo');
+}
+
 function applyFormat(type, surface) {
   if (!surface) return;
   const value = surface.value(), { start, end, text: selected } = surface.selection(); let before = '', after = '', replacement = selected;
@@ -946,16 +958,38 @@ function formatSelection(type) { applyFormat(type, viewMode === 'live' ? liveSur
 
 function renderWikiSuggest(box, surface, fromPath) {
   if (!surface?.focused()) { box.classList.add('hidden'); return; }
-  const value = surface.value(), { start: caret } = surface.selection(); const before = value.slice(0, caret); const match = before.match(/\[\[([^\]\n]*)$/);
-  if (!match || !index) { box.classList.add('hidden'); return; }
-  const query = match[1].toLowerCase(); const candidates = index.entries.filter(entry => `${noteStem(entry.path)} ${entry.path}`.toLowerCase().includes(query) && entry.path !== fromPath).slice(0, 12);
+  const value = surface.value(), { start: caret } = surface.selection(); const before = value.slice(0, caret);
+  const wikiMatch = before.match(/\[\[([^\]\n]*)$/);
+  const tagMatch = wikiMatch ? null : before.match(/(?:^|\s)#([\p{L}\p{N}_/-]*)$/u);
+  if ((!wikiMatch && !tagMatch) || !index) { box.classList.add('hidden'); return; }
   box.innerHTML = '';
-  candidates.forEach(entry => { const button = document.createElement('button'); button.type = 'button'; button.className = 'suggestion'; button.innerHTML = '<span></span><small></small>'; button.firstChild.textContent = noteStem(entry.path); button.lastChild.textContent = dirname(entry.path); button.onmousedown = event => { event.preventDefault(); surface.replace(caret - match[1].length, caret, `${noteStem(entry.path)}]]`); box.classList.add('hidden'); surface.focus(); }; box.append(button); });
+  let candidates = [];
+  if (wikiMatch) {
+    const query = wikiMatch[1].toLowerCase();
+    candidates = index.entries.filter(entry => `${noteStem(entry.path)} ${entry.path}`.toLowerCase().includes(query) && entry.path !== fromPath).slice(0, 12).map(entry => ({ value: noteStem(entry.path), label: noteStem(entry.path), meta: dirname(entry.path), start: caret - wikiMatch[1].length, suffix: ']]' }));
+    box.setAttribute('aria-label', '選擇要連結的筆記');
+  } else {
+    const query = tagMatch[1].toLowerCase();
+    const tags = new Set(index.entries.flatMap(entry => entry.tags || extractTags(entry.content)));
+    candidates = [...tags].filter(tag => tag.toLowerCase().includes(query)).sort((a, b) => a.localeCompare(b, 'zh-Hant')).slice(0, 12).map(tag => ({ value: tag, label: `#${tag}`, meta: '標籤', start: caret - tagMatch[1].length, suffix: '' }));
+    box.setAttribute('aria-label', '選擇標籤');
+  }
+  candidates.forEach(item => { const button = document.createElement('button'); button.type = 'button'; button.className = 'suggestion'; button.innerHTML = '<span></span><small></small>'; button.firstChild.textContent = item.label; button.lastChild.textContent = item.meta; button.onpointerdown = event => { event.preventDefault(); surface.replace(item.start, caret, `${item.value}${item.suffix}`); box.classList.add('hidden'); surface.focus(); }; box.append(button); });
   box.classList.toggle('hidden', !candidates.length);
 }
 
 function updateWikiSuggest() { renderWikiSuggest($('wikiSuggest'), viewMode === 'live' ? liveSurface(liveEditor) : textareaSurface($('editor')), currentPath); }
 function updatePaneWikiSuggest(pane) { renderWikiSuggest(pane.suggest, pane.mode === 'live' ? liveSurface(pane.live) : textareaSurface(pane.editor, pane.markDirty), pane.path); }
+
+function searchTag(tag) {
+  const clean = String(tag || '').replace(/^#/, '').trim();
+  if (!clean) return;
+  $('fileSearch').value = `#${clean}`;
+  if (innerWidth <= 760) app.classList.add('left-open');
+  else { app.classList.remove('left-collapsed'); $('showLeft').classList.add('hidden'); }
+  renderTree();
+  requestAnimationFrame(() => { $('fileSearch').focus(); $('fileSearch').setSelectionRange($('fileSearch').value.length, $('fileSearch').value.length); });
+}
 
 async function importPastedImage(event) {
   if (!vault || currentType !== 'md') return;
@@ -1012,6 +1046,7 @@ const liveEditor = new LiveMarkdownEditor($('liveEditor'), {
     if (resolved) { await openPath(resolved.path); if (heading) requestAnimationFrame(() => document.getElementById(heading.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-'))?.scrollIntoView()); }
   },
   onFileLink: target => { if (/^https?:\/\//i.test(target)) window.open(target, '_blank', 'noopener'); else { const node = resolveAsset(target); if (node) openPath(node.path); } },
+  onTag: searchTag,
   onPasteFiles: files => importAttachments(files, liveSurface(liveEditor))
 });
 
@@ -1149,6 +1184,7 @@ $('editor').addEventListener('keyup', updateWikiSuggest); $('editor').addEventLi
 $('editor').addEventListener('dragover', event => { if (event.dataTransfer?.files?.length) event.preventDefault(); });
 $('editor').addEventListener('drop', event => { if (!event.dataTransfer?.files?.length) return; event.preventDefault(); importAttachments([...event.dataTransfer.files]); });
 document.querySelectorAll('[data-format]').forEach(button => button.onclick = () => formatSelection(button.dataset.format));
+document.querySelectorAll('[data-history]').forEach(button => button.onclick = () => runEditorHistory(button.dataset.history, viewMode, liveEditor, $('editor')));
 document.querySelectorAll('[data-view]').forEach(button => button.onclick = () => { viewMode = button.dataset.view; localStorage.setItem('mysyncnote-view', viewMode); applyViewMode(); renderPreview(); persistVaultState(); });
 $('documentTitle').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); } if (event.key === 'Escape') { event.currentTarget.value = noteStem(currentPath); event.currentTarget.blur(); } });
 $('documentTitle').addEventListener('change', () => renamePath(currentPath, $('documentTitle').value));

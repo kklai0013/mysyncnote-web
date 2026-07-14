@@ -15,6 +15,12 @@ function syntax(text) {
 
 function decorateToken(raw) {
   const token = document.createElement('span'); token.className = 'live-token';
+  const tag = raw.match(/^(\s*)#([\p{L}\p{N}_/-]+)$/u);
+  if (tag) {
+    if (tag[1]) token.append(document.createTextNode(tag[1]));
+    const label = document.createElement('span'); label.className = 'live-tag'; label.dataset.tag = tag[2]; label.textContent = `#${tag[2]}`; label.title = `搜尋 #${tag[2]}`;
+    token.append(label); return token;
+  }
   const wiki = raw.match(/^(!?)\[\[([^\]]*)\]\]$/);
   if (wiki) {
     const [targetPart, alias] = wiki[2].split('|');
@@ -49,7 +55,7 @@ function decorateLine(line) {
     const marker = line.match(/^(\s*(?:[-*+]\s+(?:\[[ xX]\]\s+)?|\d+[.)]\s+|>\s?))/);
     if (marker) { wrapper.append(syntax(marker[0])); body = line.slice(marker[0].length); }
   }
-  const pattern = /(!?\[\[[^\]\n]*\]\]|\[[^\]\n]*\]\([^\)\n]*\)|`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|~~[^~\n]+~~|==[^=\n]+==|(?<!\*)\*[^*\n]+\*(?!\*)|(?<!_)_[^_\n]+_(?!_))/g;
+  const pattern = /(!?\[\[[^\]\n]*\]\]|\[[^\]\n]*\]\([^\)\n]*\)|`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|~~[^~\n]+~~|==[^=\n]+==|(?<!\*)\*[^*\n]+\*(?!\*)|(?<!_)_[^_\n]+_(?!_)|(?:^|\s)#[\p{L}\p{N}_/-]+)/gu;
   let cursor = 0;
   for (const match of body.matchAll(pattern)) {
     if (match.index > cursor) wrapper.append(document.createTextNode(body.slice(cursor, match.index)));
@@ -60,9 +66,9 @@ function decorateLine(line) {
 }
 
 export class LiveMarkdownEditor {
-  constructor(container, { onChange, onLink, onFileLink, onCursor, onPasteFiles } = {}) {
-    this.container = container; this.onChange = onChange; this.onLink = onLink; this.onFileLink = onFileLink; this.onCursor = onCursor; this.onPasteFiles = onPasteFiles;
-    this.source = ''; this.composing = false; this.rendering = false;
+  constructor(container, { onChange, onLink, onFileLink, onTag, onCursor, onPasteFiles } = {}) {
+    this.container = container; this.onChange = onChange; this.onLink = onLink; this.onFileLink = onFileLink; this.onTag = onTag; this.onCursor = onCursor; this.onPasteFiles = onPasteFiles;
+    this.source = ''; this.composing = false; this.rendering = false; this.history = []; this.historyIndex = -1;
     container.contentEditable = 'true'; container.spellcheck = true; container.setAttribute('role', 'textbox'); container.setAttribute('aria-multiline', 'true');
     container.addEventListener('beforeinput', event => {
       if (event.inputType !== 'insertParagraph' && event.inputType !== 'insertLineBreak') return;
@@ -77,17 +83,29 @@ export class LiveMarkdownEditor {
     container.addEventListener('compositionstart', () => { this.composing = true; });
     container.addEventListener('compositionend', () => { this.composing = false; this.#readMutation(); });
     container.addEventListener('input', () => { if (!this.composing) this.#readMutation(); });
+    container.addEventListener('keydown', event => {
+      const modifier = event.ctrlKey || event.metaKey;
+      if (!modifier || event.altKey) return;
+      const key = event.key.toLowerCase();
+      if (key === 'z' && !event.shiftKey) { event.preventDefault(); this.undo(); }
+      else if (key === 'y' || (key === 'z' && event.shiftKey)) { event.preventDefault(); this.redo(); }
+    });
     ['keyup', 'pointerup', 'focus'].forEach(type => container.addEventListener(type, () => this.onCursor?.()));
     container.addEventListener('click', event => {
       if (!getSelection()?.isCollapsed && getSelection()?.toString()) return;
       const wiki = event.target.closest('.live-wikilink');
       if (wiki) { event.preventDefault(); this.onLink?.(wiki.dataset.wikilink, wiki.dataset.heading || ''); return; }
       const link = event.target.closest('.live-markdown-link');
-      if (link) { event.preventDefault(); this.onFileLink?.(link.dataset.href); }
+      if (link) { event.preventDefault(); this.onFileLink?.(link.dataset.href); return; }
+      const tag = event.target.closest('.live-tag');
+      if (tag) { event.preventDefault(); this.onTag?.(tag.dataset.tag); }
     });
   }
 
-  setValue(source) { this.source = String(source ?? '').replace(/\r\n?/g, '\n'); this.render(); }
+  setValue(source, resetHistory = true) {
+    this.source = String(source ?? '').replace(/\r\n?/g, '\n'); this.render();
+    if (resetHistory) { this.history = [{ source: this.source, start: 0, end: 0 }]; this.historyIndex = 0; }
+  }
   value() { return this.source; }
   focus() { this.container.focus(); }
   isFocused() { return document.activeElement === this.container; }
@@ -118,8 +136,11 @@ export class LiveMarkdownEditor {
   replaceRange(start, end, text, selectMode = 'end') {
     this.source = `${this.source.slice(0, start)}${text}${this.source.slice(end)}`;
     const selectionStart = selectMode === 'select' ? start : start + text.length, selectionEnd = selectMode === 'select' ? start + text.length : selectionStart;
-    this.render(selectionStart, selectionEnd); this.onChange?.(this.source); this.onCursor?.();
+    this.render(selectionStart, selectionEnd); this.#commitHistory(selectionStart, selectionEnd); this.onChange?.(this.source); this.onCursor?.();
   }
+
+  undo() { this.#restoreHistory(this.historyIndex - 1); }
+  redo() { this.#restoreHistory(this.historyIndex + 1); }
 
   render(selectionStart = null, selectionEnd = selectionStart) {
     this.rendering = true; this.container.innerHTML = '';
@@ -133,6 +154,21 @@ export class LiveMarkdownEditor {
   #readMutation() {
     if (this.rendering) return;
     const selection = this.getSelection(); this.source = this.container.textContent.replace(/\r\n?/g, '\n');
-    this.render(selection.start, selection.end); this.onChange?.(this.source); this.onCursor?.();
+    this.render(selection.start, selection.end); this.#commitHistory(selection.start, selection.end); this.onChange?.(this.source); this.onCursor?.();
+  }
+
+  #commitHistory(start, end) {
+    const current = this.history[this.historyIndex];
+    if (current?.source === this.source) { current.start = start; current.end = end; return; }
+    this.history = this.history.slice(0, this.historyIndex + 1);
+    this.history.push({ source: this.source, start, end });
+    if (this.history.length > 200) this.history.shift();
+    this.historyIndex = this.history.length - 1;
+  }
+
+  #restoreHistory(nextIndex) {
+    if (nextIndex < 0 || nextIndex >= this.history.length || nextIndex === this.historyIndex) return;
+    this.historyIndex = nextIndex; const snapshot = this.history[nextIndex]; this.source = snapshot.source;
+    this.render(snapshot.start, snapshot.end); this.onChange?.(this.source); this.onCursor?.();
   }
 }

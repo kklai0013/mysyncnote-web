@@ -1,4 +1,4 @@
-const CACHE = 'mysyncnote-v12';
+const CACHE = 'mysyncnote-v13';
 const SHELL = [
   './', './index.html', './styles.css', './fixes.css', './manifest.webmanifest', './icon.svg',
   './js/app.js', './js/storage.js', './js/markdown.js', './js/live-editor.js', './js/graph.js', './js/canvas.js'
