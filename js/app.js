@@ -2,12 +2,13 @@ import { Vault, rememberVault, recalledVault, rememberSettingsFolder, recalledSe
 import { renderMarkdown, extractHeadings, extractTags, extractLinks, buildIndex, noteStem, replaceWikiTarget, parseFrontmatter } from './markdown.js';
 import { GraphView } from './graph.js';
 import { CanvasView } from './canvas.js';
+import { LiveMarkdownEditor } from './live-editor.js';
 
 const $ = id => document.getElementById(id);
 const app = $('app');
 const DEFAULT_SHORTCUTS = { save: 'Ctrl+S', command: 'Ctrl+P', search: 'Ctrl+K', newNote: 'Ctrl+N', graph: 'Ctrl+G', rename: 'F2', toggleLeft: 'Ctrl+B', split: 'Ctrl+\\' };
 const SHORTCUT_LABELS = { save: '立即儲存', command: '命令面板', search: '搜尋筆記庫', newNote: '新增筆記', graph: '顯示／關閉關聯圖譜', rename: '重新命名選取項目', toggleLeft: '顯示／收起左側欄', split: '將目前筆記分割到新窗格' };
-const settings = Object.assign({ attachmentFolder: 'attachments', defaultFolder: '', trashMode: 'trash', updateLinks: true, autoSave: true, settingsFileName: 'mysyncnote-settings.json', shortcuts: { ...DEFAULT_SHORTCUTS } }, JSON.parse(localStorage.getItem('mysyncnote-preferences') || '{}'));
+const settings = Object.assign({ attachmentFolder: 'attachments', trashMode: 'trash', updateLinks: true, autoSave: true, settingsFileName: 'mysyncnote-settings.json', shortcuts: { ...DEFAULT_SHORTCUTS } }, JSON.parse(localStorage.getItem('mysyncnote-preferences') || '{}'));
 settings.shortcuts = { ...DEFAULT_SHORTCUTS, ...(settings.shortcuts || {}) };
 for (const key of Object.keys(DEFAULT_SHORTCUTS)) if (typeof settings.shortcuts[key] !== 'string') settings.shortcuts[key] = '';
 let vault = null;
@@ -23,12 +24,17 @@ let autoSaveTimer = null;
 let saveChain = Promise.resolve();
 let indexingTimer = null;
 let rightPanel = 'outline';
-let viewMode = localStorage.getItem('mysyncnote-view') || 'edit';
+let viewMode = localStorage.getItem('mysyncnote-view') || 'live';
 let currentView = 'welcome';
 let graphDocked = false;
-let tabs = JSON.parse(sessionStorage.getItem('mysyncnote-tabs') || '[]');
-let secondaryPanePaths = JSON.parse(sessionStorage.getItem('mysyncnote-secondary-panes') || '[]');
+let tabs = [];
+let secondaryPanePaths = [];
 const secondaryPanes = new Map();
+let paneLayoutReady = false;
+let paneLayoutTree = null;
+let paneParking = null;
+let activePaneSlot = null;
+let pendingLayoutModel = null;
 let history = [];
 let historyIndex = -1;
 let objectUrls = [];
@@ -38,6 +44,15 @@ function persistSettings() {
   localStorage.setItem('mysyncnote-preferences', JSON.stringify(settings));
   localStorage.setItem('mysyncnote-expanded', JSON.stringify([...expanded]));
   scheduleSettingsFileWrite();
+}
+
+function vaultStateKey() { return vault ? `mysyncnote-vault-state:${vault.name}` : ''; }
+function readVaultState() {
+  try { return JSON.parse(localStorage.getItem(vaultStateKey()) || '{}'); } catch { return {}; }
+}
+function persistVaultState() {
+  if (!vault) return;
+  localStorage.setItem(vaultStateKey(), JSON.stringify({ currentPath, selectedPath, tabs, secondaryPanePaths, graphDocked, viewMode, layout: serializePaneLayout() }));
 }
 
 let settingsWriteTimer = null;
@@ -118,6 +133,171 @@ function showView(name) {
 
 function hideMobilePanels() {
   app.classList.remove('left-open', 'right-open');
+}
+
+function initPaneLayout() {
+  if (paneLayoutReady) return;
+  const dock = $('workspaceDock');
+  paneParking = document.createElement('div'); paneParking.className = 'pane-parking hidden';
+  const primary = createPaneSlot('primary');
+  primary.append($('noteWorkspace'), $('canvasWorkspace'));
+  paneLayoutTree = primary;
+  dock.innerHTML = '';
+  dock.append(paneLayoutTree, paneParking);
+  paneParking.append($('graphWorkspace'));
+  activePaneSlot = primary; primary.classList.add('active-pane-slot');
+  paneLayoutReady = true;
+}
+
+function createPaneSlot(key) {
+  const slot = document.createElement('div');
+  slot.className = 'pane-slot'; slot.dataset.paneKey = key;
+  slot.addEventListener('pointerdown', () => setActivePaneSlot(slot));
+  slot.addEventListener('dragover', event => {
+    const types = [...event.dataTransfer.types];
+    if (!types.includes('text/mysyncnote-path') && !types.includes('text/mysyncnote-pane')) return;
+    event.preventDefault();
+    const rect = slot.getBoundingClientRect(), x = (event.clientX - rect.left) / rect.width, y = (event.clientY - rect.top) / rect.height;
+    const direction = Math.min(x, 1 - x) < Math.min(y, 1 - y) ? (x < .5 ? 'left' : 'right') : (y < .5 ? 'top' : 'bottom');
+    slot.dataset.dropDirection = direction;
+  });
+  slot.addEventListener('dragleave', event => { if (!slot.contains(event.relatedTarget)) delete slot.dataset.dropDirection; });
+  slot.addEventListener('drop', event => {
+    event.preventDefault(); event.stopPropagation();
+    const direction = slot.dataset.dropDirection || 'right'; delete slot.dataset.dropDirection;
+    const panePath = event.dataTransfer.getData('text/mysyncnote-pane');
+    const filePath = event.dataTransfer.getData('text/mysyncnote-path');
+    if (panePath && secondaryPanes.has(panePath)) movePaneSlot(secondaryPanes.get(panePath).element.closest('.pane-slot'), slot, direction);
+    else if (filePath) addSecondaryPane(filePath, direction, slot);
+  });
+  return slot;
+}
+
+function setActivePaneSlot(slot) {
+  if (!slot?.classList.contains('pane-slot')) return;
+  activePaneSlot?.classList.remove('active-pane-slot'); activePaneSlot = slot; slot.classList.add('active-pane-slot');
+}
+
+function makeSplit(orientation, children) {
+  const split = document.createElement('div'); split.className = `pane-split ${orientation}`;
+  children.forEach(child => split.append(child)); refreshSplitters(split); return split;
+}
+
+function refreshSplitters(split) {
+  split.querySelectorAll(':scope > .pane-resizer').forEach(item => item.remove());
+  const children = [...split.children];
+  for (let i = children.length - 1; i > 0; i--) {
+    const resizer = document.createElement('div'); resizer.className = 'pane-resizer';
+    split.insertBefore(resizer, children[i]);
+    resizer.addEventListener('pointerdown', event => {
+      event.preventDefault(); resizer.setPointerCapture(event.pointerId);
+      const before = resizer.previousElementSibling, after = resizer.nextElementSibling;
+      const a = before.getBoundingClientRect(), b = after.getBoundingClientRect();
+      const start = split.classList.contains('horizontal') ? event.clientX : event.clientY;
+      const sizeA = split.classList.contains('horizontal') ? a.width : a.height, sizeB = split.classList.contains('horizontal') ? b.width : b.height;
+      const move = moveEvent => {
+        const now = split.classList.contains('horizontal') ? moveEvent.clientX : moveEvent.clientY, delta = now - start;
+        before.style.flex = `0 0 ${Math.max(180, sizeA + delta)}px`; after.style.flex = `0 0 ${Math.max(180, sizeB - delta)}px`;
+      };
+      const up = () => { resizer.removeEventListener('pointermove', move); resizer.removeEventListener('pointerup', up); persistVaultState(); };
+      resizer.addEventListener('pointermove', move); resizer.addEventListener('pointerup', up);
+    });
+  }
+}
+
+function insertPane(element, key, direction = 'right', targetSlot = activePaneSlot) {
+  initPaneLayout();
+  const existing = element.closest('.pane-slot');
+  if (existing && existing !== targetSlot) { movePaneSlot(existing, targetSlot, direction); return existing; }
+  if (existing) return existing;
+  const slot = createPaneSlot(key); slot.append(element);
+  targetSlot ||= paneLayoutTree.querySelector?.('.pane-slot') || paneLayoutTree;
+  const orientation = direction === 'left' || direction === 'right' ? 'horizontal' : 'vertical';
+  const before = direction === 'left' || direction === 'top';
+  const parent = targetSlot.parentElement;
+  if (parent?.classList.contains('pane-split') && parent.classList.contains(orientation)) {
+    parent.insertBefore(slot, before ? targetSlot : targetSlot.nextSibling); refreshSplitters(parent);
+  } else {
+    const split = document.createElement('div'); split.className = `pane-split ${orientation}`;
+    if (targetSlot === paneLayoutTree) { $('workspaceDock').replaceChild(split, paneLayoutTree); paneLayoutTree = split; }
+    else parent.replaceChild(split, targetSlot);
+    (before ? [slot, targetSlot] : [targetSlot, slot]).forEach(child => split.append(child)); refreshSplitters(split);
+  }
+  setActivePaneSlot(slot); persistVaultState(); return slot;
+}
+
+function movePaneSlot(source, target, direction) {
+  if (!source || !target || source === target || source.contains(target)) return;
+  detachPaneSlot(source, false);
+  const orientation = direction === 'left' || direction === 'right' ? 'horizontal' : 'vertical', before = direction === 'left' || direction === 'top';
+  const parent = target.parentElement;
+  if (parent?.classList.contains('pane-split') && parent.classList.contains(orientation)) { parent.insertBefore(source, before ? target : target.nextSibling); refreshSplitters(parent); }
+  else {
+    const split = document.createElement('div'); split.className = `pane-split ${orientation}`;
+    if (target === paneLayoutTree) { $('workspaceDock').replaceChild(split, paneLayoutTree); paneLayoutTree = split; }
+    else parent.replaceChild(split, target);
+    (before ? [source, target] : [target, source]).forEach(child => split.append(child)); refreshSplitters(split);
+  }
+  setActivePaneSlot(source); persistVaultState();
+}
+
+function detachPaneSlot(slot, parkContents = true) {
+  if (!slot || slot.dataset.paneKey === 'primary') return;
+  const parent = slot.parentElement;
+  if (parkContents) while (slot.firstChild) paneParking.append(slot.firstChild);
+  slot.remove();
+  if (parent?.classList.contains('pane-split')) {
+    const children = [...parent.children].filter(child => !child.classList.contains('pane-resizer'));
+    if (children.length === 1) {
+      const only = children[0], grand = parent.parentElement;
+      if (parent === paneLayoutTree) { $('workspaceDock').replaceChild(only, parent); paneLayoutTree = only; }
+      else grand.replaceChild(only, parent);
+    } else refreshSplitters(parent);
+  }
+  activePaneSlot = document.querySelector('.pane-slot[data-pane-key="primary"]'); setActivePaneSlot(activePaneSlot);
+  persistVaultState();
+}
+
+function serializePaneLayout(node = paneLayoutTree) {
+  if (!paneLayoutReady || !node) return null;
+  if (node.classList.contains('pane-slot')) return { type: 'pane', key: node.dataset.paneKey, size: node.style.flexBasis || '' };
+  return { type: 'split', orientation: node.classList.contains('vertical') ? 'vertical' : 'horizontal', children: [...node.children].filter(child => !child.classList.contains('pane-resizer')).map(serializePaneLayout) };
+}
+
+function restorePaneLayout(model) {
+  if (!model || !paneLayoutReady) return;
+  const elements = new Map([['primary', [$('noteWorkspace'), $('canvasWorkspace')]], ['graph', [$('graphWorkspace')]]]);
+  secondaryPanes.forEach((pane, path) => elements.set(`note:${path}`, [pane.element]));
+  for (const [key, list] of elements) if (key !== 'primary') list.forEach(element => paneParking.append(element));
+  const build = item => {
+    if (item.type === 'pane') {
+      if (item.key === 'graph' && !graphDocked) return null;
+      const list = elements.get(item.key); if (!list) return null;
+      const slot = createPaneSlot(item.key); list.forEach(element => slot.append(element)); if (item.size) slot.style.flexBasis = item.size; elements.delete(item.key); return slot;
+    }
+    const children = (item.children || []).map(build).filter(Boolean); return children.length > 1 ? makeSplit(item.orientation || 'horizontal', children) : children[0] || null;
+  };
+  let tree = build(model);
+  if (!tree) {
+    tree = createPaneSlot('primary');
+    (elements.get('primary') || [$('noteWorkspace'), $('canvasWorkspace')]).forEach(element => tree.append(element));
+    elements.delete('primary');
+  }
+  if (!tree.querySelector?.('[data-pane-key="primary"]') && tree.dataset.paneKey !== 'primary') {
+    const primary = createPaneSlot('primary');
+    (elements.get('primary') || [$('noteWorkspace'), $('canvasWorkspace')]).forEach(element => primary.append(element));
+    elements.delete('primary'); paneLayoutTree = makeSplit('horizontal', [primary, tree]);
+  } else paneLayoutTree = tree;
+  const old = [...$('workspaceDock').children].find(child => child !== paneParking);
+  if (old) $('workspaceDock').replaceChild(paneLayoutTree, old); else $('workspaceDock').insertBefore(paneLayoutTree, paneParking);
+  for (const [key, list] of elements) {
+    if (key === 'primary') continue;
+    if (key === 'graph' && !graphDocked) { list.forEach(element => paneParking.append(element)); continue; }
+    const slot = createPaneSlot(key); list.forEach(element => slot.append(element));
+    const tree = paneLayoutTree, split = document.createElement('div'); split.className = 'pane-split horizontal';
+    $('workspaceDock').replaceChild(split, tree); split.append(tree, slot); refreshSplitters(split); paneLayoutTree = split;
+  }
+  setActivePaneSlot(paneLayoutTree.querySelector?.('.pane-slot') || paneLayoutTree);
 }
 
 async function ask(title, value = '', help = '') {
@@ -206,23 +386,33 @@ async function loadVault(handle) {
   $('settingsVault').textContent = vault.name;
   localStorage.setItem('mysyncnote-vault-name', vault.name);
   await rebuildIndex();
-  const defaultPath = settings.defaultFolder.trim().replace(/\\/g, '/').replace(/^\/|\/$/g, '');
-  if (defaultPath && vault.node(defaultPath)?.kind === 'directory') {
-    selectedPath = defaultPath;
-    for (let path = defaultPath; path; path = dirname(path)) expanded.add(path);
-  } else selectedPath = '';
+  const previous = readVaultState();
+  if (['live', 'edit', 'split', 'read'].includes(previous.viewMode)) {
+    viewMode = previous.viewMode;
+    localStorage.setItem('mysyncnote-view', viewMode);
+  }
+  selectedPath = vault.node(previous.selectedPath) ? previous.selectedPath : '';
+  tabs = (previous.tabs || []).filter(path => vault.node(path));
+  secondaryPanePaths = (previous.secondaryPanePaths || []).filter(path => vault.node(path)?.ext === 'md');
+  graphDocked = Boolean(previous.graphDocked);
+  pendingLayoutModel = previous.layout || null;
+  if (selectedPath) for (let path = selectedPath; path; path = dirname(path)) expanded.add(path);
   renderTree();
-  if (tabs.length) {
-    tabs = tabs.filter(path => vault.node(path));
-    if (tabs.length) await openPath(tabs[0], false);
-    else showView('welcome');
+  if (vault.node(previous.currentPath)?.kind === 'file') {
+    await openPath(previous.currentPath, false);
+  } else if (tabs.length) {
+    await openPath(tabs[0], false);
   } else {
     const candidates = [...vault.markdownNodes(), ...vault.canvasNodes()];
-    const first = candidates.find(node => !defaultPath || node.path.startsWith(`${defaultPath}/`)) || candidates[0];
+    const first = candidates[0];
     if (first) await openPath(first.path);
     else showView('welcome');
   }
   await restoreSecondaryPanes();
+  if (pendingLayoutModel) restorePaneLayout(pendingLayoutModel);
+  else if (graphDocked && !$('graphWorkspace').closest('.pane-slot')) insertPane($('graphWorkspace'), 'graph', 'right', activePaneSlot);
+  showView(currentView);
+  persistVaultState();
   renderTabs();
   toast(`已開啟筆記庫「${vault.name}」`);
 }
@@ -278,10 +468,11 @@ function appendTreeNode(node, parent, depth, query) {
       expanded.has(node.path) ? expanded.delete(node.path) : expanded.add(node.path);
       persistSettings(); renderTree();
     } else await openPath(node.path);
+    persistVaultState();
     hideMobilePanels();
   };
   row.ondblclick = event => { event.preventDefault(); renamePath(node.path); };
-  row.oncontextmenu = event => { event.preventDefault(); selectedPath = node.path; renderTree(); showNodeMenu(node, event.clientX, event.clientY); };
+  row.oncontextmenu = event => { event.preventDefault(); selectedPath = node.path; persistVaultState(); renderTree(); showNodeMenu(node, event.clientX, event.clientY); };
   let longPress;
   row.addEventListener('pointerdown', event => { if (event.pointerType !== 'mouse') longPress = setTimeout(() => showNodeMenu(node, event.clientX, event.clientY), 600); });
   ['pointerup', 'pointercancel', 'pointermove'].forEach(type => row.addEventListener(type, () => clearTimeout(longPress)));
@@ -423,11 +614,11 @@ async function openPath(path, addHistory = true) {
   if (dirty && currentPath !== path) await saveCurrent();
   selectedPath = path; currentPath = path; currentType = node.ext; loadedModified = node.lastModified; dirty = false;
   if (!tabs.includes(path)) tabs.push(path);
-  sessionStorage.setItem('mysyncnote-tabs', JSON.stringify(tabs));
+  persistVaultState();
   if (addHistory && history[historyIndex] !== path) { history = history.slice(0, historyIndex + 1); history.push(path); historyIndex = history.length - 1; }
   if (node.ext === 'md') {
     const content = await vault.readText(path, true);
-    $('editor').value = content; $('documentTitle').value = noteStem(path); showView('note'); applyViewMode(); renderPreview(); renderRightPanel();
+    $('editor').value = content; liveEditor.setValue(content); $('documentTitle').value = noteStem(path); showView('note'); applyViewMode(); renderPreview(); renderRightPanel();
   } else if (node.ext === 'canvas') {
     const content = await vault.readText(path, true); canvasView.load(content); $('canvasTitle').textContent = noteStem(path); showView('canvas');
   } else {
@@ -446,22 +637,30 @@ function renderTabs() {
     tab.innerHTML = `<span>${icon}</span><span class="tab-label"></span><span class="tab-close">×</span>`;
     tab.querySelector('.tab-label').textContent = basename(path).replace(/\.(md|canvas)$/i, '');
     tab.onclick = event => { if (event.target.closest('.tab-close')) closeTab(path); else openPath(path); };
+    tab.oncontextmenu = event => { event.preventDefault(); showMenu([
+      { label: '向右分割', action: () => addSecondaryPane(path, 'right', activePaneSlot) },
+      { label: '向下分割', action: () => addSecondaryPane(path, 'bottom', activePaneSlot) },
+      { label: '向左分割', action: () => addSecondaryPane(path, 'left', activePaneSlot) },
+      { label: '向上分割', action: () => addSecondaryPane(path, 'top', activePaneSlot) }
+    ], event.clientX, event.clientY); };
     tab.ondragstart = event => { event.dataTransfer.setData('text/mysyncnote-path', path); event.dataTransfer.effectAllowed = 'copyMove'; };
     tab.ondragover = event => { if ([...event.dataTransfer.types].includes('text/mysyncnote-path')) event.preventDefault(); };
     tab.ondrop = event => {
       const source = event.dataTransfer.getData('text/mysyncnote-path'); if (!source || source === path || !tabs.includes(source)) return;
       event.preventDefault(); event.stopPropagation();
       tabs = tabs.filter(item => item !== source); const targetIndex = tabs.indexOf(path); tabs.splice(targetIndex, 0, source);
-      sessionStorage.setItem('mysyncnote-tabs', JSON.stringify(tabs)); renderTabs();
+      persistVaultState(); renderTabs();
     };
     container.append(tab);
   }
 }
 
-async function addSecondaryPane(path, insertBefore = null) {
+async function addSecondaryPane(path, direction = 'right', targetSlot = activePaneSlot) {
   if (!vault || vault.node(path)?.ext !== 'md') return toast('只有 Markdown 筆記可以加入筆記窗格', true);
   if (secondaryPanes.has(path)) {
-    secondaryPanes.get(path).element.scrollIntoView({ behavior: 'smooth', inline: 'center' });
+    const existing = secondaryPanes.get(path).element.closest('.pane-slot');
+    if (targetSlot && existing !== targetSlot) movePaneSlot(existing, targetSlot, direction);
+    else secondaryPanes.get(path).element.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
     return;
   }
   const node = vault.node(path);
@@ -469,8 +668,8 @@ async function addSecondaryPane(path, insertBefore = null) {
   const pane = { path, modified: node.lastModified, dirty: false, timer: null, mode: 'edit', objectUrls: [] };
   const element = document.createElement('section');
   element.className = 'dock-pane secondary-note-pane'; element.dataset.path = path;
-  element.innerHTML = `<header class="secondary-pane-header" draggable="true"><span class="tree-icon">▤</span><span class="secondary-pane-title"></span><span class="secondary-pane-state">已儲存</span><button class="pane-mode" title="切換編輯／並排／閱讀">編輯</button><button class="pane-primary icon-btn" title="在主要窗格開啟">↗</button><button class="pane-close icon-btn" title="關閉窗格">×</button></header><div class="secondary-pane-body"><textarea class="secondary-pane-editor" spellcheck="true"></textarea><article class="secondary-pane-preview markdown-body"></article></div>`;
-  pane.element = element; pane.editor = element.querySelector('.secondary-pane-editor'); pane.preview = element.querySelector('.secondary-pane-preview'); pane.state = element.querySelector('.secondary-pane-state'); pane.body = element.querySelector('.secondary-pane-body');
+  element.innerHTML = `<header class="secondary-pane-header" draggable="true"><span class="tree-icon">▤</span><span class="secondary-pane-title"></span><span class="secondary-pane-state">已儲存</span><button class="pane-mode" title="切換混合／原始碼／並排／閱讀">混合</button><button class="pane-primary icon-btn" title="在主要窗格開啟">↗</button><button class="pane-close icon-btn" title="關閉窗格">×</button></header><div class="secondary-pane-body live"><textarea class="secondary-pane-editor" spellcheck="true"></textarea><div class="secondary-pane-live markdown-body"></div><article class="secondary-pane-preview markdown-body"></article></div>`;
+  pane.element = element; pane.editor = element.querySelector('.secondary-pane-editor'); pane.preview = element.querySelector('.secondary-pane-preview'); pane.state = element.querySelector('.secondary-pane-state'); pane.body = element.querySelector('.secondary-pane-body'); pane.mode = 'live';
   element.querySelector('.secondary-pane-title').textContent = path;
   pane.editor.value = content;
   const render = () => {
@@ -485,7 +684,7 @@ async function addSecondaryPane(path, insertBefore = null) {
     try {
       pane.modified = await vault.writeText(pane.path, pane.editor.value, pane.modified);
       pane.dirty = false; pane.state.textContent = '已儲存'; scheduleIndex();
-      if (pane.path === currentPath && !dirty) { $('editor').value = pane.editor.value; loadedModified = pane.modified; renderPreview(); }
+      if (pane.path === currentPath && !dirty) { $('editor').value = pane.editor.value; liveEditor.setValue(pane.editor.value); loadedModified = pane.modified; renderPreview(); }
     } catch (error) {
       pane.state.textContent = '外部版本衝突';
       if (error.name === 'ExternalChangeError' && await confirmAction('這個窗格偵測到外部修改', `「${pane.path}」已被 FolderSync 或另一個窗格修改。要用這個窗格的內容覆蓋嗎？`, '保留這個窗格', true)) {
@@ -493,26 +692,21 @@ async function addSecondaryPane(path, insertBefore = null) {
       } else toast(`「${pane.path}」尚未儲存`, true);
     }
   };
-  pane.editor.oninput = () => { pane.dirty = true; pane.state.textContent = '尚未儲存'; if (pane.mode !== 'edit') render(); clearTimeout(pane.timer); if (settings.autoSave) pane.timer = setTimeout(pane.save, 800); };
+  const markPaneDirty = () => { pane.dirty = true; pane.state.textContent = '尚未儲存'; if (pane.mode === 'split' || pane.mode === 'read') render(); clearTimeout(pane.timer); if (settings.autoSave) pane.timer = setTimeout(pane.save, 800); };
+  pane.live = new LiveMarkdownEditor(element.querySelector('.secondary-pane-live'), { renderBlock: source => renderMarkdown(source, { resolveWiki: target => index?.resolve(target, pane.path) }), onChange: source => { pane.editor.value = source; markPaneDirty(); }, onLink: target => { const resolved = index?.resolve(target, pane.path); if (resolved) openPath(resolved.path); } });
+  pane.live.setValue(content);
+  pane.editor.oninput = markPaneDirty;
   pane.editor.onkeydown = event => { if (eventMatchesShortcut(event, settings.shortcuts.save)) { event.preventDefault(); event.stopPropagation(); pane.save(); } };
   element.querySelector('.pane-mode').onclick = event => {
-    pane.mode = pane.mode === 'edit' ? 'split' : pane.mode === 'split' ? 'read' : 'edit';
-    pane.body.className = `secondary-pane-body ${pane.mode}`; event.currentTarget.textContent = pane.mode === 'edit' ? '編輯' : pane.mode === 'split' ? '並排' : '閱讀'; render();
+    pane.mode = pane.mode === 'live' ? 'edit' : pane.mode === 'edit' ? 'split' : pane.mode === 'split' ? 'read' : 'live';
+    pane.body.className = `secondary-pane-body ${pane.mode}`; event.currentTarget.textContent = pane.mode === 'live' ? '混合' : pane.mode === 'edit' ? '原始碼' : pane.mode === 'split' ? '並排' : '閱讀'; if (pane.mode === 'live') pane.live.setValue(pane.editor.value); else render();
   };
   element.querySelector('.pane-primary').onclick = () => openPath(pane.path);
   element.querySelector('.pane-close').onclick = () => closeSecondaryPane(pane.path);
   const header = element.querySelector('.secondary-pane-header');
   header.ondragstart = event => { event.dataTransfer.setData('text/mysyncnote-pane', pane.path); event.dataTransfer.effectAllowed = 'move'; };
-  element.ondragover = event => { if (![...event.dataTransfer.types].includes('text/mysyncnote-pane')) return; event.preventDefault(); const rect = element.getBoundingClientRect(); element.classList.toggle('pane-drop-before', event.clientX < rect.left + rect.width / 2); element.classList.toggle('pane-drop-after', event.clientX >= rect.left + rect.width / 2); };
-  element.ondragleave = () => element.classList.remove('pane-drop-before', 'pane-drop-after');
-  element.ondrop = event => {
-    const source = event.dataTransfer.getData('text/mysyncnote-pane'); if (!source || source === pane.path) return;
-    event.preventDefault(); const sourcePane = secondaryPanes.get(source); if (!sourcePane) return;
-    const before = element.classList.contains('pane-drop-before'); $('workspaceDock').insertBefore(sourcePane.element, before ? element : element.nextSibling); element.classList.remove('pane-drop-before', 'pane-drop-after'); persistSecondaryOrder();
-  };
   secondaryPanes.set(path, pane);
-  if (insertBefore) $('workspaceDock').insertBefore(element, insertBefore);
-  else $('workspaceDock').insertBefore(element, $('graphWorkspace'));
+  insertPane(element, `note:${path}`, direction, targetSlot);
   secondaryPanePaths = [...secondaryPanes.keys()]; persistSecondaryOrder(); render();
   showView(currentView === 'welcome' ? (currentPath ? (currentType === 'canvas' ? 'canvas' : 'note') : 'welcome') : currentView);
 }
@@ -520,13 +714,14 @@ async function addSecondaryPane(path, insertBefore = null) {
 async function closeSecondaryPane(path, save = true) {
   const pane = secondaryPanes.get(path); if (!pane) return;
   if (save && pane.dirty) await pane.save();
-  clearTimeout(pane.timer); pane.objectUrls.forEach(URL.revokeObjectURL); pane.element.remove(); secondaryPanes.delete(path); persistSecondaryOrder();
+  const slot = pane.element.closest('.pane-slot');
+  clearTimeout(pane.timer); pane.objectUrls.forEach(URL.revokeObjectURL); pane.element.remove(); secondaryPanes.delete(path); if (slot) detachPaneSlot(slot, false); persistSecondaryOrder();
   if (!currentPath && !graphDocked && !secondaryPanes.size) showView('welcome');
 }
 
 function persistSecondaryOrder() {
   secondaryPanePaths = [...$('workspaceDock').querySelectorAll('.secondary-note-pane')].map(element => element.dataset.path);
-  sessionStorage.setItem('mysyncnote-secondary-panes', JSON.stringify(secondaryPanePaths));
+  persistVaultState();
 }
 
 async function restoreSecondaryPanes() {
@@ -544,14 +739,14 @@ function remapSecondaryPath(oldPath, newPath) {
   persistSecondaryOrder();
 }
 
-async function splitCurrentNote() {
+async function splitCurrentNote(direction = 'right') {
   if (!currentPath || currentType !== 'md') return toast('請先開啟一篇 Markdown 筆記');
-  await addSecondaryPane(currentPath);
+  await addSecondaryPane(currentPath, direction, activePaneSlot);
 }
 
 async function closeTab(path) {
   if (path === currentPath && dirty) await saveCurrent();
-  const indexOf = tabs.indexOf(path); tabs = tabs.filter(tab => tab !== path); sessionStorage.setItem('mysyncnote-tabs', JSON.stringify(tabs));
+  const indexOf = tabs.indexOf(path); tabs = tabs.filter(tab => tab !== path); persistVaultState();
   if (path === currentPath) { const next = tabs[Math.min(indexOf, tabs.length - 1)]; if (next) await openPath(next, false); else { currentPath = ''; showView('welcome'); } }
   renderTabs();
 }
@@ -561,6 +756,7 @@ function updateHistoryButtons() { $('goBack').disabled = historyIndex <= 0; $('g
 function applyViewMode() {
   $('editorArea').className = `editor-area mode-${viewMode}`;
   document.querySelectorAll('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === viewMode));
+  if (viewMode === 'live') liveEditor.setValue($('editor').value);
 }
 
 function scheduleSave() {
@@ -581,7 +777,7 @@ async function saveCurrent(silent = false) {
       const modified = await vault.writeText(pathAtStart, text, expected);
       if (currentPath === pathAtStart) { loadedModified = modified; dirty = false; setSaveState('已儲存'); }
       const mirror = secondaryPanes.get(pathAtStart);
-      if (mirror && !mirror.dirty) { mirror.editor.value = text; mirror.modified = modified; mirror.state.textContent = '已同步'; }
+      if (mirror && !mirror.dirty) { mirror.editor.value = text; mirror.live.setValue(text); mirror.modified = modified; mirror.state.textContent = '已同步'; }
       scheduleIndex();
       if (!silent) toast('已儲存');
     } catch (error) {
@@ -603,7 +799,7 @@ async function resolveConflict(path, localText, error) {
   if (choice === 'default') {
     loadedModified = await vault.writeText(path, localText, null); dirty = false; setSaveState('已儲存'); toast('已保留目前版本');
   } else if (choice === 'external') {
-    $('editor').value = error.externalText; vault.contents.set(path, error.externalText); loadedModified = error.externalModified; dirty = false; renderPreview(); setSaveState('已載入外部版本');
+    $('editor').value = error.externalText; liveEditor.setValue(error.externalText); vault.contents.set(path, error.externalText); loadedModified = error.externalModified; dirty = false; renderPreview(); setSaveState('已載入外部版本');
   } else if (choice === 'both') {
     const folder = dirname(path); const desired = `${noteStem(path)}（衝突 ${new Date().toLocaleString('zh-TW').replace(/[/:]/g, '-')}）.md`;
     const name = await vault.uniqueName(folder, desired); await vault.writeText(`${folder ? `${folder}/` : ''}${name}`, localText);
@@ -687,7 +883,10 @@ function findUnlinkedMentions() {
 }
 
 function formatSelection(type) {
-  const editor = $('editor'); const start = editor.selectionStart, end = editor.selectionEnd; const selected = editor.value.slice(start, end); let before = '', after = '', replacement = selected;
+  if (viewMode === 'live' && !liveEditor.activeTextarea()) liveEditor.activate(Math.max(0, liveEditor.blocks.length - 1));
+  const editor = viewMode === 'live' ? liveEditor.activeTextarea() : $('editor');
+  if (!editor) return;
+  const start = editor.selectionStart, end = editor.selectionEnd; const selected = editor.value.slice(start, end); let before = '', after = '', replacement = selected;
   const lineStart = editor.value.lastIndexOf('\n', start - 1) + 1;
   switch (type) {
     case 'heading': before = '## '; break; case 'bold': before = '**'; after = '**'; break; case 'italic': before = '*'; after = '*'; break; case 'strike': before = '~~'; after = '~~'; break; case 'highlight': before = '=='; after = '=='; break;
@@ -733,7 +932,9 @@ async function importAttachments(files) {
 
 function openGraph() {
   if (!index) return toast('請先開啟筆記庫');
-  graphDocked = true; showView('graph');
+  graphDocked = true;
+  if (!$('graphWorkspace').closest('.pane-slot')) insertPane($('graphWorkspace'), 'graph', 'right', activePaneSlot);
+  showView('graph'); persistVaultState();
   requestAnimationFrame(() => { updateGraph(); graph.resize(); graph.draw(); });
 }
 
@@ -741,6 +942,8 @@ function toggleGraphDock() { if (graphDocked) closeGraphDock(); else openGraph()
 
 function closeGraphDock() {
   graphDocked = false; $('graphWorkspace').classList.add('hidden');
+  const slot = $('graphWorkspace').closest('.pane-slot'); if (slot) detachPaneSlot(slot);
+  persistVaultState();
   if (!currentPath && !secondaryPanes.size) showView('welcome');
 }
 
@@ -750,6 +953,15 @@ function updateGraph() {
 }
 
 function closeSpecialView() { closeGraphDock(); }
+
+const liveEditor = new LiveMarkdownEditor($('liveEditor'), {
+  renderBlock: source => renderMarkdown(source, { resolveWiki: target => index?.resolve(target, currentPath) }),
+  onChange: source => { $('editor').value = source; scheduleSave(); renderRightPanel(); },
+  onLink: async (target, heading) => {
+    const resolved = index?.resolve(target, currentPath);
+    if (resolved) { await openPath(resolved.path); if (heading) requestAnimationFrame(() => document.getElementById(heading.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-'))?.scrollIntoView()); }
+  }
+});
 
 const graph = new GraphView($('graphCanvas'), path => openPath(path));
 const canvasView = new CanvasView({
@@ -840,7 +1052,6 @@ function renderShortcutSettings() {
 
 function openSettings() {
   $('settingsVault').textContent = vault?.name || '尚未選擇';
-  $('defaultFolder').value = settings.defaultFolder || '';
   $('attachmentFolder').value = settings.attachmentFolder;
   $('trashMode').value = settings.trashMode;
   $('updateLinks').checked = settings.updateLinks;
@@ -854,7 +1065,12 @@ function openSettings() {
 // Main controls
 $('openVault').onclick = openVaultPicker; $('welcomeOpen').onclick = openVaultPicker; $('settingsChangeVault').onclick = openVaultPicker;
 $('newNote').onclick = () => createNote(); $('newFolder').onclick = () => createFolder(); $('newCanvas').onclick = () => createCanvas(); $('refreshVault').onclick = refreshVault;
-$('splitCurrent').onclick = splitCurrentNote;
+$('splitCurrent').onclick = event => showMenu([
+  { label: '向右分割目前筆記', action: () => splitCurrentNote('right') },
+  { label: '向下分割目前筆記', action: () => splitCurrentNote('bottom') },
+  { label: '向左分割目前筆記', action: () => splitCurrentNote('left') },
+  { label: '向上分割目前筆記', action: () => splitCurrentNote('top') }
+], event.clientX, event.clientY);
 $('workspaceDock').ondragover = event => { if ([...event.dataTransfer.types].includes('text/mysyncnote-path')) { event.preventDefault(); $('workspaceDock').classList.add('drag-target'); } };
 $('workspaceDock').ondragleave = event => { if (!$('workspaceDock').contains(event.relatedTarget)) $('workspaceDock').classList.remove('drag-target'); };
 $('workspaceDock').ondrop = event => { $('workspaceDock').classList.remove('drag-target'); const path = event.dataTransfer.getData('text/mysyncnote-path'); if (path) { event.preventDefault(); addSecondaryPane(path); } };
@@ -874,7 +1090,7 @@ $('editor').addEventListener('keyup', updateWikiSuggest); $('editor').addEventLi
 $('editor').addEventListener('dragover', event => { if (event.dataTransfer?.files?.length) event.preventDefault(); });
 $('editor').addEventListener('drop', event => { if (!event.dataTransfer?.files?.length) return; event.preventDefault(); importAttachments([...event.dataTransfer.files]); });
 document.querySelectorAll('[data-format]').forEach(button => button.onclick = () => formatSelection(button.dataset.format));
-document.querySelectorAll('[data-view]').forEach(button => button.onclick = () => { viewMode = button.dataset.view; localStorage.setItem('mysyncnote-view', viewMode); applyViewMode(); renderPreview(); });
+document.querySelectorAll('[data-view]').forEach(button => button.onclick = () => { viewMode = button.dataset.view; localStorage.setItem('mysyncnote-view', viewMode); applyViewMode(); renderPreview(); persistVaultState(); });
 $('documentTitle').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); } if (event.key === 'Escape') { event.currentTarget.value = noteStem(currentPath); event.currentTarget.blur(); } });
 $('documentTitle').addEventListener('change', () => renamePath(currentPath, $('documentTitle').value));
 $('documentMore').onclick = event => { const node = vault?.node(currentPath); if (node) showNodeMenu(node, event.clientX, event.clientY); };
@@ -883,15 +1099,9 @@ document.querySelectorAll('[data-panel]').forEach(button => button.onclick = () 
 $('goBack').onclick = () => { if (historyIndex > 0) openPath(history[--historyIndex], false).then(updateHistoryButtons); };
 $('goForward').onclick = () => { if (historyIndex < history.length - 1) openPath(history[++historyIndex], false).then(updateHistoryButtons); };
 $('openGraph').onclick = toggleGraphDock; $('closeGraph').onclick = closeGraphDock; $('graphScope').onchange = updateGraph; $('graphDepth').oninput = updateGraph; $('graphFilter').oninput = updateGraph; $('graphIsolates').onclick = () => { $('graphIsolates').classList.toggle('active'); updateGraph(); };
-$('canvasAddText').onclick = () => canvasView.addText(); $('canvasAddNote').onclick = () => canvasView.addNote(); $('canvasAddGroup').onclick = () => canvasView.addGroup(); $('canvasFit').onclick = () => canvasView.fit(); $('canvasConnect').onclick = () => { const on = canvasView.toggleConnect(); $('canvasConnect').classList.toggle('primary', on); $('canvasConnect').textContent = on ? '請選兩個節點' : '連接節點'; }; $('closeCanvas').onclick = () => closeTab(currentPath);
+$('canvasAddText').onclick = () => canvasView.addText(); $('canvasAddNote').onclick = () => canvasView.addNote(); $('canvasAddLink').onclick = async () => { const url = await ask('新增網頁連結', 'https://', '輸入要放進 Canvas 的網址'); if (url) canvasView.addLink(url); }; $('canvasAddGroup').onclick = () => canvasView.addGroup(); $('canvasUndo').onclick = () => canvasView.undo(); $('canvasRedo').onclick = () => canvasView.redo(); $('canvasFit').onclick = () => canvasView.fit(); $('closeCanvas').onclick = () => closeTab(currentPath);
 
 $('attachmentFolder').onchange = () => { settings.attachmentFolder = $('attachmentFolder').value.trim() || 'attachments'; persistSettings(); };
-$('defaultFolder').onchange = () => {
-  const path = $('defaultFolder').value.trim().replace(/\\/g, '/').replace(/^\/|\/$/g, '');
-  if (path && vault && vault.node(path)?.kind !== 'directory') { toast('這個相對路徑不是筆記庫裡的資料夾', true); $('defaultFolder').value = settings.defaultFolder || ''; return; }
-  settings.defaultFolder = path; persistSettings();
-  if (path && vault) { selectedPath = path; for (let parent = path; parent; parent = dirname(parent)) expanded.add(parent); renderTree(); }
-};
 $('trashMode').onchange = () => { settings.trashMode = $('trashMode').value; persistSettings(); };
 $('updateLinks').onchange = () => { settings.updateLinks = $('updateLinks').checked; persistSettings(); };
 $('autoSave').onchange = () => { settings.autoSave = $('autoSave').checked; persistSettings(); };
@@ -939,4 +1149,5 @@ async function restore() {
 }
 
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('./sw.js').catch(console.warn);
+initPaneLayout();
 restore();

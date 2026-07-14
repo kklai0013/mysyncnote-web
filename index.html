@@ -51,8 +51,8 @@
           <button id="goForward" class="icon-btn" title="下一頁" disabled>→</button>
         </nav>
         <div id="breadcrumbs" class="breadcrumbs">尚未開啟筆記庫</div>
-        <button id="openGraph" class="icon-btn" title="關聯圖譜" aria-label="關聯圖譜">網</button>
-        <button id="splitCurrent" class="icon-btn" title="將目前筆記分割到新窗格" aria-label="分割目前筆記">分</button>
+        <button id="openGraph" class="header-action" title="開啟或關閉關聯圖譜">圖譜</button>
+        <button id="splitCurrent" class="header-action split-layout-button" title="選擇分割方向">分割⌄</button>
         <button id="toggleRight" class="icon-btn" title="資訊面板" aria-label="資訊面板">☷</button>
       </header>
 
@@ -91,7 +91,8 @@
             <button data-format="task" title="待辦事項">☑</button>
             <span class="tool-spacer"></span>
             <div class="view-switch" role="group" aria-label="檢視模式">
-              <button data-view="edit" class="active">編輯</button>
+              <button data-view="live" class="active">混合</button>
+              <button data-view="edit">原始碼</button>
               <button data-view="split">並排</button>
               <button data-view="read">閱讀</button>
             </div>
@@ -102,6 +103,7 @@
             <textarea id="editor" aria-label="Markdown 編輯器" spellcheck="true"></textarea>
             <div id="wikiSuggest" class="suggestions hidden"></div>
           </div>
+          <div id="liveEditor" class="live-editor markdown-body"></div>
           <article id="preview" class="markdown-body"></article>
         </div>
       </section>
@@ -125,14 +127,16 @@
           <div><h2 id="canvasTitle">Canvas</h2><span id="canvasState">已儲存</span></div>
           <button id="canvasAddText">＋文字卡片</button>
           <button id="canvasAddNote">＋筆記卡片</button>
-          <button id="canvasAddGroup">＋群組</button>
-          <button id="canvasConnect">連接節點</button>
+          <button id="canvasAddLink">＋網頁連結</button>
+          <button id="canvasAddGroup">群組選取項目</button>
+          <button id="canvasUndo" title="復原">↶</button>
+          <button id="canvasRedo" title="重做">↷</button>
           <button id="canvasFit">符合畫面</button>
           <button id="closeCanvas" class="icon-btn" title="關閉">×</button>
         </header>
         <div id="canvasViewport" class="canvas-viewport">
           <div id="canvasSurface" class="canvas-surface"><svg id="canvasEdges" class="canvas-edges"></svg><div id="canvasNodes"></div></div>
-          <div class="canvas-help">空白處拖曳平移 · 滾輪或雙指縮放 · 拖曳卡片移動</div>
+          <div class="canvas-help">框選多張卡片 · Shift 點選多個 · 從卡片圓點直接拉線 · Space＋拖曳平移</div>
         </div>
       </section>
       </div>
@@ -165,10 +169,10 @@
   <dialog id="settingsDialog" class="dialog wide-dialog">
     <form method="dialog">
       <header><div><h2>MySyncNote 設定</h2><p>筆記內容只會寫入你開啟的筆記庫。</p></div><button value="cancel" class="icon-btn">×</button></header>
-      <section class="settings-section"><h3>筆記庫</h3><div class="setting-row"><div><b>目前筆記庫</b><small id="settingsVault">尚未選擇</small></div><button id="settingsChangeVault" type="button">更換筆記庫</button></div><div class="setting-row"><div><b>預設進入的資料夾</b><small>填寫筆記庫內的相對路徑，例如：工作/專案</small></div><input id="defaultFolder" placeholder="留空表示根目錄"></div><div class="setting-row"><div><b>附件資料夾</b><small>貼上的圖片和附件存放位置</small></div><input id="attachmentFolder" value="attachments"></div><div class="setting-row"><div><b>刪除方式</b><small>刪除項目移到筆記庫的垃圾桶</small></div><select id="trashMode"><option value="trash">移到 .trash</option><option value="delete">直接刪除</option></select></div></section>
+      <section class="settings-section"><h3>筆記庫</h3><div class="setting-row"><div><b>目前筆記庫</b><small id="settingsVault">尚未選擇</small></div><button id="settingsChangeVault" type="button">更換筆記庫</button></div><div class="setting-row"><div><b>附件資料夾</b><small>貼上的圖片和附件存放位置</small></div><input id="attachmentFolder" value="attachments"></div><div class="setting-row"><div><b>刪除方式</b><small>刪除項目移到筆記庫的垃圾桶</small></div><select id="trashMode"><option value="trash">移到 .trash</option><option value="delete">直接刪除</option></select></div></section>
       <section class="settings-section"><h3>編輯與連結</h3><label class="setting-row"><span><b>重新命名時更新連結</b><small>自動更新其他 Markdown 筆記中的 Wiki Link</small></span><input id="updateLinks" type="checkbox" checked></label><label class="setting-row"><span><b>自動儲存</b><small>停止輸入後自動寫入檔案</small></span><input id="autoSave" type="checkbox" checked></label></section>
       <section class="settings-section"><h3>快捷鍵</h3><p class="settings-hint">點欄位後直接按下新的按鍵組合；Backspace 可清除。</p><div id="shortcutSettings" class="shortcut-settings"></div></section>
-      <section class="settings-section"><h3>設定檔</h3><div class="setting-row"><div><b>設定檔位置</b><small id="settingsFileLocation">目前只儲存在這台裝置</small></div><button id="chooseSettingsFolder" type="button">選擇資料夾</button></div><div class="setting-row"><div><b>設定檔名稱</b><small>會在選定位置建立一個可同步的 JSON 檔</small></div><input id="settingsFileName" value="mysyncnote-settings.json"></div></section>
+      <section class="settings-section"><h3>全域設定檔</h3><p class="settings-hint">這個位置由所有筆記庫共用，只需要選擇一次。因瀏覽器安全規則，網頁無法取得或使用文字形式的 Windows／Android 絕對路徑；系統資料夾選擇器所選的就是實際位置。</p><div class="setting-row"><div><b>實際存放資料夾</b><small id="settingsFileLocation">目前只儲存在這台裝置</small></div><button id="chooseSettingsFolder" type="button">選擇實際資料夾</button></div><div class="setting-row"><div><b>設定檔名稱</b><small>切換筆記庫不需要重新設定</small></div><input id="settingsFileName" value="mysyncnote-settings.json"></div></section>
       <section class="settings-section"><h3>外部同步</h3><p>MySyncNote 不登入 Google，也不持有同步帳號。請讓 FolderSync 同步同一個筆記庫；回到本程式時會重新檢查外部修改。</p></section>
     </form>
   </dialog>
