@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#121513">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <title>MySyncNote</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0d0f0e;--side:#121513;--panel:#181c19;--line:#303731;--text:#edf2ee;--muted:#96a199;--green:#9be3b8;--green2:#193b27;--red:#ff9d9d}*{box-sizing:border-box}html,body{height:100%}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 system-ui,"Segoe UI",sans-serif}button,input,textarea{font:inherit}button{color:inherit}.app{height:100%;display:grid;grid-template-columns:280px 1fr}.sidebar{min-width:0;display:flex;flex-direction:column;border-right:1px solid var(--line);background:var(--side)}.brand{padding:18px;border-bottom:1px solid var(--line)}.brand h1{margin:0;font-size:1.25rem}.brand p{margin:3px 0 0;color:var(--muted);font-size:.78rem}.storage{margin:12px;padding:12px;border:1px solid var(--line);border-radius:12px;background:#0e110f}.storage-head{display:flex;justify-content:space-between;gap:8px;align-items:center}.storage b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.badge{flex:none;padding:2px 7px;border-radius:999px;background:var(--green2);color:var(--green);font-size:.68rem;font-weight:800}.storage p{margin:7px 0;color:var(--muted);font-size:.78rem}.buttons{display:flex;gap:7px;flex-wrap:wrap}button{min-height:38px;padding:0 12px;border:1px solid #3b453e;border-radius:9px;background:#252b27;cursor:pointer;font-weight:700}button.primary{border-color:transparent;background:var(--green);color:#092014}button:disabled{opacity:.38;cursor:not-allowed}.new{margin:0 12px 10px}.search{margin:0 12px 10px;width:calc(100% - 24px);height:38px;padding:0 11px;border:1px solid var(--line);border-radius:9px;background:#0c0f0d;color:var(--text);outline:none}.files{min-height:0;overflow:auto;padding:0 8px 16px}.file{display:flex;align-items:center;gap:9px;width:100%;margin:2px 0;padding:8px 10px;border:0;background:transparent;text-align:left;font-weight:500}.file:hover,.file.active{background:#242a26}.file.active{color:var(--green)}.file span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.editor{min-width:0;display:flex;flex-direction:column}.toolbar{min-height:60px;padding:10px 16px;display:flex;align-items:center;gap:9px;border-bottom:1px solid var(--line);background:#101311}.title{min-width:0;flex:1;border:0;background:transparent;color:var(--text);font-size:1.12rem;font-weight:750;outline:none}.save-state{color:var(--muted);font-size:.78rem}.workspace{min-height:0;flex:1;display:grid;grid-template-columns:1fr}.workspace.previewing{grid-template-columns:1fr 1fr}.write,.preview{min-width:0;height:100%;overflow:auto}.write textarea{display:block;width:100%;height:100%;resize:none;padding:34px max(28px,8vw);border:0;outline:none;background:var(--bg);color:var(--text);font:16px/1.8 ui-monospace,"Cascadia Code",monospace}.preview{display:none;padding:34px max(28px,5vw);border-left:1px solid var(--line);background:#111412}.previewing .preview{display:block}.preview h1,.preview h2,.preview h3{line-height:1.25}.preview code{padding:2px 5px;border-radius:5px;background:#242a26;color:#c9f1d8}.preview pre{overflow:auto;padding:14px;border-radius:10px;background:#090b0a}.preview blockquote{margin-left:0;padding-left:14px;border-left:3px solid var(--green);color:var(--muted)}.empty{display:grid;place-items:center;height:100%;padding:25px;text-align:center;color:var(--muted)}.mobile-head{display:none}.notice{position:fixed;right:18px;bottom:18px;max-width:min(420px,calc(100% - 36px));padding:12px 15px;border:1px solid var(--line);border-radius:11px;background:#222824;box-shadow:0 15px 40px #0008}.notice.error{border-color:#744;color:#ffd3d3}.hidden{display:none!important}.dialog{position:fixed;inset:0;display:grid;place-items:center;padding:18px;background:#000a}.dialog-card{width:min(520px,100%);padding:20px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:0 24px 70px #000}.dialog-card h2{margin-top:0}.dialog-card p{color:var(--muted)}.dialog-card code{color:var(--green)}
+    @media(max-width:760px){.app{display:block}.sidebar{position:fixed;z-index:5;inset:0 54px 0 0;transform:translateX(-110%);transition:.18s;box-shadow:18px 0 50px #0009}.sidebar.open{transform:none}.mobile-head{display:inline-flex}.toolbar{padding:8px}.workspace.previewing{grid-template-columns:1fr}.previewing .write{display:none}.write textarea,.preview{padding:22px 18px}.save-state{display:none}}
+  </style>
+</head>
+<body>
+<div class="app">
+  <aside id="sidebar" class="sidebar">
+    <div class="brand"><h1>MySyncNote</h1><p>Markdown 筆記</p></div>
+    <section class="storage">
+      <div class="storage-head"><b id="folderName">示範模式</b><span id="modeBadge" class="badge">記憶體</span></div>
+      <p id="storageHelp">先試用編輯器；選取資料夾後才會讀寫真實 .md 檔案。</p>
+      <div class="buttons"><button id="openFolder" class="primary">開啟資料夾</button><button id="driveInfo">Google Drive</button></div>
+    </section>
+    <button id="newNote" class="new primary">＋ 新增筆記</button>
+    <input id="search" class="search" placeholder="搜尋檔名">
+    <nav id="files" class="files"></nav>
+  </aside>
+
+  <main class="editor">
+    <header class="toolbar">
+      <button id="menu" class="mobile-head">☰</button>
+      <input id="title" class="title" value="歡迎使用 MySyncNote" aria-label="筆記名稱">
+      <span id="saveState" class="save-state">示範筆記</span>
+      <button id="rename">F2 改名</button>
+      <button id="previewButton">預覽</button>
+      <button id="save" class="primary">儲存</button>
+    </header>
+    <section id="workspace" class="workspace">
+      <div class="write"><textarea id="content" spellcheck="false"></textarea></div>
+      <article id="preview" class="preview"></article>
+    </section>
+  </main>
+</div>
+
+<div id="driveDialog" class="dialog hidden">
+  <div class="dialog-card">
+    <h2>Google Drive 有兩種做法</h2>
+    <p><b>現在這個網頁版：</b>若要在程式裡按「登入 Google」並直接列出雲端檔案，必須設定 Google OAuth Client ID、啟用 Drive API，並用 HTTPS 網址。</p>
+    <p><b>不申請 API：</b>電腦選擇 Google Drive for desktop 的同步資料夾；Android 原生 App 則使用系統資料夾選擇器，直接選手機已登入的 Google Drive。</p>
+    <p>這個本機 HTML 先完成真實 Markdown 編輯；Google 登入要等固定 HTTPS 網址確定後才能設定授權來源。</p>
+    <button id="closeDialog" class="primary">了解</button>
+  </div>
+</div>
+<div id="notice" class="notice hidden"></div>
+
+<script>
+  const $=id=>document.getElementById(id);
+  const demo={name:'歡迎使用 MySyncNote.md',content:'# 歡迎使用 MySyncNote\n\n這不是測試紀錄，而是一篇可以直接修改的 Markdown 筆記。\n\n## 現在可以試什麼\n\n- 在這裡修改文字\n- 按「預覽」查看排版\n- 按「新增筆記」建立另一篇\n- 選擇真實資料夾後讀寫 `.md` 檔\n- 按 `Ctrl+S` 儲存\n- 按 `F2` 重新命名檔案\n\n> Google Drive 的儲存方式請按左側「Google Drive」。\n'};
+  let directory=null,notes=[{...demo,handle:null}],current=notes[0],dirty=false,previewing=false;
+
+  const escape=s=>s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  function markdown(source){let s=escape(source);s=s.replace(/^```([\s\S]*?)```$/gm,'<pre><code>$1</code></pre>').replace(/^### (.+)$/gm,'<h3>$1</h3>').replace(/^## (.+)$/gm,'<h2>$1</h2>').replace(/^# (.+)$/gm,'<h1>$1</h1>').replace(/^> (.+)$/gm,'<blockquote>$1</blockquote>').replace(/^[-*] (.+)$/gm,'<li>$1</li>').replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>').replace(/\n\n/g,'</p><p>').replace(/\n/g,'<br>');return '<p>'+s+'</p>'}
+  function notify(text,error=false){$('notice').textContent=text;$('notice').className='notice'+(error?' error':'');clearTimeout(notify.timer);notify.timer=setTimeout(()=>$('notice').classList.add('hidden'),3500)}
+  function cleanName(name){name=name.trim().replace(/[\\/:*?"<>|]/g,'-');if(!name.toLowerCase().endsWith('.md'))name+='.md';return name||'未命名.md'}
+  function renderList(){const q=$('search').value.toLowerCase();$('files').innerHTML='';notes.filter(n=>n.name.toLowerCase().includes(q)).forEach(n=>{const b=document.createElement('button');b.className='file'+(n===current?' active':'');b.innerHTML='<span>▤</span><span></span>';b.lastChild.textContent=n.name;b.onclick=()=>select(n);$('files').append(b)})}
+  async function select(note){if(current&&dirty)await save();current=note;$('title').value=note.name.replace(/\.md$/i,'');$('content').value=note.content;dirty=false;updateState();renderList();renderPreview();$('sidebar').classList.remove('open')}
+  function updateState(){if(!current)return;$('saveState').textContent=directory?(dirty?'尚未儲存':'已儲存'):'示範模式';$('rename').disabled=!directory||!current.handle}
+  function renderPreview(){$('preview').innerHTML=markdown($('content').value)}
+  async function openFolder(){if(!window.showDirectoryPicker){notify(`此環境沒有 showDirectoryPicker（安全環境：${isSecureContext?'是':'否'}）`,true);return}try{directory=await showDirectoryPicker({mode:'readwrite'});notes=[];for await(const entry of directory.values()){if(entry.kind==='file'&&entry.name.toLowerCase().endsWith('.md')){const file=await entry.getFile();notes.push({name:entry.name,content:await file.text(),handle:entry})}}notes.sort((a,b)=>a.name.localeCompare(b.name,'zh-Hant'));$('folderName').textContent=directory.name;$('modeBadge').textContent='真實檔案';$('storageHelp').textContent='所有儲存都直接寫回這個資料夾。';if(notes.length)await select(notes[0]);else await createNote();renderList();notify(`已開啟 ${directory.name}`)}catch(e){if(e.name!=='AbortError')notify(`${e.name}: ${e.message}`,true)}}
+  async function createNote(){if(current&&dirty)await save();let base='未命名筆記',i=1,name=base+'.md';while(notes.some(n=>n.name===name))name=`${base} ${++i}.md`;let handle=null;if(directory)handle=await directory.getFileHandle(name,{create:true});const note={name,content:'# 未命名筆記\n\n開始寫作…\n',handle};notes.unshift(note);await select(note);dirty=true;updateState();$('title').focus();$('title').select()}
+  async function save(){if(!current)return;current.content=$('content').value;if(!directory){dirty=false;updateState();notify('示範模式不會寫入硬碟；請先開啟資料夾');return}try{if(!current.handle)current.handle=await directory.getFileHandle(current.name,{create:true});const out=await current.handle.createWritable();await out.write(current.content);await out.close();dirty=false;updateState();notify(`已儲存 ${current.name}`)}catch(e){notify(`${e.name}: ${e.message}`,true)}}
+  async function rename(){if(!directory||!current?.handle)return;const next=cleanName($('title').value);if(next===current.name)return;try{const newHandle=await directory.getFileHandle(next,{create:true});const out=await newHandle.createWritable();await out.write($('content').value);await out.close();await directory.removeEntry(current.name);current.name=next;current.handle=newHandle;dirty=false;renderList();updateState();notify(`已改名為 ${next}`)}catch(e){notify(`${e.name}: ${e.message}`,true)}}
+
+  $('openFolder').onclick=openFolder;$('newNote').onclick=createNote;$('save').onclick=save;$('rename').onclick=rename;$('search').oninput=renderList;
+  $('content').oninput=()=>{dirty=true;current.content=$('content').value;updateState();if(previewing)renderPreview()};
+  $('title').oninput=()=>{dirty=true;updateState()};$('title').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();rename()}};
+  $('previewButton').onclick=()=>{previewing=!previewing;$('workspace').classList.toggle('previewing',previewing);$('previewButton').textContent=previewing?'編輯':'預覽';renderPreview()};
+  $('menu').onclick=()=>$('sidebar').classList.toggle('open');$('driveInfo').onclick=()=>$('driveDialog').classList.remove('hidden');$('closeDialog').onclick=()=>$('driveDialog').classList.add('hidden');
+  addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){e.preventDefault();save()}if(e.key==='F2'){e.preventDefault();$('title').focus();$('title').select()}});
+  addEventListener('beforeunload',e=>{if(dirty){e.preventDefault();e.returnValue=''}});
+  $('content').value=current.content;renderList();renderPreview();updateState();
+  if('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('./sw.js').catch(()=>{});
+</script>
+</body>
+</html>
