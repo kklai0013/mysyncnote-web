@@ -5,10 +5,12 @@ const COLORS = ['', '1', '2', '3', '4', '5', '6'];
 const COLOR_VALUES = { '1': '#e57373', '2': '#ffb25c', '3': '#e1cb62', '4': '#6dca87', '5': '#56c8d8', '6': '#b08ae5' };
 
 export class CanvasView {
-  constructor({ viewport, surface, nodesLayer, edgesLayer, onChange, onOpenNote, chooseNote }) {
-    Object.assign(this, { viewport, surface, nodesLayer, edgesLayer, onChange, onOpenNote, chooseNote });
+  constructor({ viewport, surface, nodesLayer, edgesLayer, onChange, onOpenNote, chooseNote, onViewChange }) {
+    Object.assign(this, { viewport, surface, nodesLayer, edgesLayer, onChange, onOpenNote, chooseNote, onViewChange });
     this.data = { nodes: [], edges: [] };
+    this.metadata = {};
     this.scale = 1; this.pan = { x: 120, y: 90 };
+    this.currentKey = ''; this.valid = true;
     this.selected = new Set(); this.selectedEdge = null;
     this.drag = null; this.connection = null; this.marquee = null;
     this.keys = new Set(); this.touchPoints = new Map(); this.clipboard = null;
@@ -16,26 +18,48 @@ export class CanvasView {
     this.#createControls(); this.#events();
   }
 
-  load(text) {
-    try {
-      const parsed = JSON.parse(text || '{}');
-      this.data = { nodes: Array.isArray(parsed.nodes) ? parsed.nodes : [], edges: Array.isArray(parsed.edges) ? parsed.edges : [] };
-    } catch { this.data = { nodes: [], edges: [] }; }
+  load(text, { key = '', view = null } = {}) {
+    let parsed;
+    try { parsed = JSON.parse(text || '{}'); }
+    catch (error) { throw new Error(`Canvas JSON 格式錯誤：${error.message}`); }
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) throw new Error('Canvas 必須包含 nodes 與 edges 陣列；原檔案沒有被修改。');
+    const data = { nodes: clone(parsed.nodes), edges: clone(parsed.edges) };
+    const metadata = Object.fromEntries(Object.entries(parsed).filter(([key]) => key !== 'nodes' && key !== 'edges').map(([key, value]) => [key, clone(value)]));
+    for (const node of data.nodes) {
+      if (!node?.id || !Number.isFinite(node.x) || !Number.isFinite(node.y) || !Number.isFinite(node.width) || !Number.isFinite(node.height)) throw new Error('Canvas 含有無效卡片座標；原檔案沒有被修改。');
+    }
+    this.data = data; this.metadata = metadata; this.currentKey = key; this.valid = true;
     this.selected.clear(); this.selectedEdge = null; this.history = []; this.future = [];
-    this.render(); this.fit();
+    if (view && Number.isFinite(view.scale) && Number.isFinite(view.pan?.x) && Number.isFinite(view.pan?.y)) {
+      this.scale = clamp(view.scale, .18, 3); this.pan = { x: view.pan.x, y: view.pan.y };
+    } else if (this.data.nodes.length) {
+      const bounds = this.#bounds(this.data.nodes); this.scale = 1; this.pan = { x: 80 - bounds.x, y: 70 - bounds.y };
+    } else { this.scale = 1; this.pan = { x: 120, y: 90 }; }
+    this.render(); this.activate();
   }
 
-  json() { return JSON.stringify(this.data, null, 2); }
-  #remember() { this.history.push(this.json()); if (this.history.length > 80) this.history.shift(); this.future = []; }
+  json() { return JSON.stringify({ ...this.metadata, ...this.data }, null, 2); }
+  viewState() { return { scale: this.scale, pan: { ...this.pan } }; }
+  activate() { requestAnimationFrame(() => { this.#transform(); this.#renderEdges(); }); }
+  zoomBy(factor) {
+    const rect = this.viewport.getBoundingClientRect(), old = this.scale;
+    const mx = rect.width / 2, my = rect.height / 2;
+    this.scale = clamp(this.scale * factor, .18, 3);
+    this.pan.x = mx - (mx - this.pan.x) * this.scale / old; this.pan.y = my - (my - this.pan.y) * this.scale / old;
+    this.#transform(); this.#viewChanged();
+  }
+  resetView() { this.scale = 1; this.pan = { x: 120, y: 90 }; this.#transform(); this.#viewChanged(); }
+  #remember() { this.history.push(JSON.stringify(this.data)); if (this.history.length > 80) this.history.shift(); this.future = []; }
   #changed() { this.onChange?.(this.json()); this.#updateControls(); }
+  #viewChanged() { this.onViewChange?.(this.viewState(), this.currentKey); }
 
   undo() {
     if (!this.history.length) return;
-    this.future.push(this.json()); this.data = JSON.parse(this.history.pop()); this.selected.clear(); this.selectedEdge = null; this.render(); this.#changed();
+    this.future.push(JSON.stringify(this.data)); this.data = JSON.parse(this.history.pop()); this.selected.clear(); this.selectedEdge = null; this.render(); this.#changed();
   }
   redo() {
     if (!this.future.length) return;
-    this.history.push(this.json()); this.data = JSON.parse(this.future.pop()); this.selected.clear(); this.selectedEdge = null; this.render(); this.#changed();
+    this.history.push(JSON.stringify(this.data)); this.data = JSON.parse(this.future.pop()); this.selected.clear(); this.selectedEdge = null; this.render(); this.#changed();
   }
 
   #viewportCenter() {
@@ -139,8 +163,10 @@ export class CanvasView {
       const content = document.createElement('div'); content.className = 'canvas-node-content';
       if (node.type === 'text') {
         const textarea = document.createElement('textarea'); textarea.value = node.text || '';
+        let remembered = false;
         textarea.addEventListener('focus', () => { if (!this.selected.has(node.id)) { this.selected = new Set([node.id]); this.#selectionClasses(); } });
-        textarea.addEventListener('input', () => { node.text = textarea.value; this.#changed(); }); content.append(textarea);
+        textarea.addEventListener('input', () => { if (!remembered) { this.#remember(); remembered = true; } node.text = textarea.value; this.#changed(); });
+        textarea.addEventListener('blur', () => { remembered = false; }); content.append(textarea);
       } else if (node.type === 'file') {
         content.innerHTML = '<p>筆記卡片</p><b></b><p class="hint">雙擊開啟完整筆記</p>'; content.querySelector('b').textContent = node.file || '找不到筆記'; content.ondblclick = () => this.onOpenNote?.(node.file);
       } else if (node.type === 'link') {
@@ -294,13 +320,13 @@ export class CanvasView {
   #transform() { this.surface.style.transform = `translate(${this.pan.x}px,${this.pan.y}px) scale(${this.scale})`; this.#updateControls(); }
 
   fit() {
-    if (!this.data.nodes.length) { this.scale = 1; this.pan = { x: 120, y: 90 }; this.#transform(); return; }
+    if (!this.data.nodes.length) { this.scale = 1; this.pan = { x: 120, y: 90 }; this.#transform(); this.#viewChanged(); return; }
     this.#fitBounds(this.#bounds(this.data.nodes));
   }
   fitSelection() { const nodes = this.data.nodes.filter(node => this.selected.has(node.id)); if (nodes.length) this.#fitBounds(this.#bounds(nodes)); }
   #fitBounds(bounds) {
     const rect = this.viewport.getBoundingClientRect(); this.scale = clamp(Math.min((rect.width - 120) / Math.max(1, bounds.width), (rect.height - 120) / Math.max(1, bounds.height)), .2, 1.8);
-    this.pan = { x: (rect.width - bounds.width * this.scale) / 2 - bounds.x * this.scale, y: (rect.height - bounds.height * this.scale) / 2 - bounds.y * this.scale }; this.#transform();
+    this.pan = { x: (rect.width - bounds.width * this.scale) / 2 - bounds.x * this.scale, y: (rect.height - bounds.height * this.scale) / 2 - bounds.y * this.scale }; this.#transform(); this.#viewChanged();
   }
 
   #events() {
@@ -337,11 +363,21 @@ export class CanvasView {
       for (const node of this.data.nodes) if (node.x < a.x + a.width && node.x + node.width > a.x && node.y < a.y + a.height && node.y + node.height > a.y) this.selected.add(node.id);
       this.#selectionClasses(); this.#updateControls();
     });
-    const end = event => { this.touchPoints.delete(event.pointerId); if (this.touchPoints.size < 2) this.pinch = null; this.drag = null; if (this.marquee) { this.marquee = null; this.selectionBox.classList.add('hidden'); this.selectionBox.removeAttribute('style'); this.#selectionClasses(); this.#updateControls(); } };
+    const end = event => {
+      const changedView = this.drag?.type === 'pan' || Boolean(this.pinch);
+      this.touchPoints.delete(event.pointerId); if (this.touchPoints.size < 2) this.pinch = null; this.drag = null;
+      if (this.marquee) { this.marquee = null; this.selectionBox.classList.add('hidden'); this.selectionBox.removeAttribute('style'); this.#selectionClasses(); this.#updateControls(); }
+      if (changedView) this.#viewChanged();
+    };
     this.viewport.addEventListener('pointerup', end); this.viewport.addEventListener('pointercancel', end);
     this.viewport.addEventListener('wheel', event => {
-      event.preventDefault(); const rect = this.viewport.getBoundingClientRect(), mx = event.clientX - rect.left, my = event.clientY - rect.top, old = this.scale;
-      this.scale = clamp(this.scale * Math.exp(-event.deltaY * .0012), .18, 3); this.pan.x = mx - (mx - this.pan.x) * this.scale / old; this.pan.y = my - (my - this.pan.y) * this.scale / old; this.#transform();
+      event.preventDefault();
+      if (event.ctrlKey || event.metaKey || this.keys.has('Space')) {
+        const rect = this.viewport.getBoundingClientRect(), mx = event.clientX - rect.left, my = event.clientY - rect.top, old = this.scale;
+        this.scale = clamp(this.scale * Math.exp(-event.deltaY * .0012), .18, 3); this.pan.x = mx - (mx - this.pan.x) * this.scale / old; this.pan.y = my - (my - this.pan.y) * this.scale / old;
+      } else if (event.shiftKey) this.pan.x -= event.deltaY || event.deltaX;
+      else { this.pan.x -= event.deltaX; this.pan.y -= event.deltaY; }
+      this.#transform(); this.#viewChanged();
     }, { passive: false });
     this.viewport.addEventListener('dragover', event => event.preventDefault());
     this.viewport.addEventListener('drop', event => { event.preventDefault(); const path = event.dataTransfer.getData('text/mysyncnote-path'); if (!path) return; const point = this.#worldPoint(event); this.#remember(); const node = { id: uid('node'), type: 'file', x: point.x, y: point.y, width: 300, height: 190, file: path }; this.data.nodes.push(node); this.selected = new Set([node.id]); this.#changed(); this.render(); });
@@ -354,6 +390,8 @@ export class CanvasView {
       else if (ctrl && event.key.toLowerCase() === 'v') { event.preventDefault(); this.paste(); }
       else if (ctrl && event.key.toLowerCase() === 'z' && !event.shiftKey) { event.preventDefault(); this.undo(); }
       else if ((ctrl && event.key.toLowerCase() === 'y') || (ctrl && event.shiftKey && event.key.toLowerCase() === 'z')) { event.preventDefault(); this.redo(); }
+      else if (event.shiftKey && event.key === '1') { event.preventDefault(); this.fit(); }
+      else if (event.key === '0') { event.preventDefault(); this.resetView(); }
       else if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); this.deleteSelected(); }
       else if (event.key === 'Escape') { this.connection = null; this.marquee = null; this.selected.clear(); this.selectedEdge = null; this.render(); }
     });

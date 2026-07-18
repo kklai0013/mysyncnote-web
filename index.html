@@ -8,7 +8,6 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
-  <link rel="stylesheet" href="fixes.css">
   <title>MySyncNote</title>
 </head>
 <body>
@@ -61,8 +60,8 @@
       <section id="welcome" class="welcome">
         <div class="welcome-card">
           <div class="welcome-mark">M</div>
-          <h1>你的 Markdown 筆記庫</h1>
-          <p>直接開啟電腦或手機上的資料夾。筆記保持為一般的 <code>.md</code>、附件和 <code>.canvas</code> 檔案。</p>
+          <h1 id="welcomeTitle">你的 Markdown 筆記庫</h1>
+          <p id="welcomeMessage">直接開啟電腦或手機上的資料夾。筆記保持為一般的 <code>.md</code>、附件和 <code>.canvas</code> 檔案。</p>
           <button id="welcomeOpen" class="primary large">開啟筆記庫</button>
           <p class="hint">FolderSync 或其他工具可以同步這個資料夾；MySyncNote 不需要 Google API。</p>
         </div>
@@ -74,7 +73,10 @@
           <div class="document-title-row">
             <input id="documentTitle" class="document-title" aria-label="筆記名稱" spellcheck="false">
             <span id="saveState" class="save-state">已儲存</span>
-            <button id="documentMore" class="icon-btn" title="筆記選單" aria-label="筆記選單">•••</button>
+            <div class="document-actions">
+              <button id="documentMore" class="icon-btn" title="更多筆記操作" aria-label="更多筆記操作">•••</button>
+              <button id="closeDocument" class="icon-btn close-pane" title="關閉目前筆記" aria-label="關閉目前筆記">×</button>
+            </div>
           </div>
           <div class="editor-toolbar" aria-label="Markdown 格式工具列">
             <button data-history="undo" title="復原（Ctrl+Z）" aria-label="復原">↶</button>
@@ -127,18 +129,26 @@
 
       <section id="canvasWorkspace" class="canvas-workspace hidden dock-pane canvas-pane">
         <header class="special-toolbar canvas-toolbar">
-          <div><h2 id="canvasTitle">Canvas</h2><span id="canvasState">已儲存</span></div>
-          <button id="canvasAddText">＋文字卡片</button>
-          <button id="canvasAddNote">＋筆記卡片</button>
-          <button id="canvasAddLink">＋網頁連結</button>
-          <button id="canvasAddGroup">群組選取項目</button>
-          <button id="canvasUndo" title="復原">↶</button>
-          <button id="canvasRedo" title="重做">↷</button>
-          <button id="canvasFit">符合畫面</button>
-          <button id="closeCanvas" class="icon-btn" title="關閉">×</button>
+          <div class="special-title"><h2 id="canvasTitle">Canvas</h2><span id="canvasState">已儲存</span></div>
+          <div class="canvas-toolbar-actions">
+            <button id="canvasAddText">＋文字</button>
+            <button id="canvasAddNote">＋筆記</button>
+            <button id="canvasAddLink">＋連結</button>
+            <button id="canvasAddGroup">群組</button>
+            <button id="canvasUndo" title="復原（Ctrl+Z）">↶</button>
+            <button id="canvasRedo" title="重做（Ctrl+Y）">↷</button>
+          </div>
+          <button id="closeCanvas" class="icon-btn close-pane" title="關閉目前 Canvas" aria-label="關閉目前 Canvas">×</button>
         </header>
         <div id="canvasViewport" class="canvas-viewport">
           <div id="canvasSurface" class="canvas-surface"><svg id="canvasEdges" class="canvas-edges"></svg><div id="canvasNodes"></div></div>
+          <div class="canvas-zoom-controls" aria-label="Canvas 縮放控制">
+            <button id="canvasZoomOut" title="縮小">−</button>
+            <button id="canvasZoomReset" title="重設為 100%"><span id="canvasZoomLabel">100%</span></button>
+            <button id="canvasZoomIn" title="放大">＋</button>
+            <button id="canvasFit" title="符合畫面（Shift+1）">適合</button>
+          </div>
+          <div id="canvasError" class="canvas-error hidden" role="alert"></div>
           <div class="canvas-help">框選多張卡片 · Shift 點選多個 · 從卡片圓點直接拉線 · Space＋拖曳平移</div>
         </div>
       </section>

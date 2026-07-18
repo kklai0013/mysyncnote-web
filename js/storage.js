@@ -105,6 +105,7 @@ export class Vault {
 
   async scan() {
     this.nodes.clear();
+    this.contents.clear();
     const root = { kind: 'directory', name: this.name, path: '', parentPath: '', handle: this.handle, children: [] };
     this.nodes.set('', root);
     await this.#scanDirectory(this.handle, '', root);
