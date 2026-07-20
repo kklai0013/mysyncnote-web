@@ -83,6 +83,11 @@ button:disabled { opacity: .38; cursor: not-allowed; }
 .split-layout-button { font-size: 13px; }
 .tabs { height: 37px; flex: 0 0 37px; display: flex; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid var(--line); background: #15171b; scrollbar-width: thin; }
 .tabs:empty { display: none; }
+.editor-group { width: 100%; height: 100%; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); }
+.editor-group-body { min-width: 0; min-height: 0; flex: 1 1 0; display: flex; flex-direction: column; overflow: hidden; }
+.editor-group-body > .dock-pane { width: 100%; min-width: 0; min-height: 0; flex: 1 1 0; }
+.group-tabs { width: 100%; flex: 0 0 37px; }
+.active-pane-slot > .editor-group > .group-tabs { box-shadow: inset 0 -2px var(--accent); }
 .tab { min-width: 130px; max-width: 220px; height: 36px; min-height: 36px; padding: 0 8px; display: flex; align-items: center; gap: 7px; border: 0; border-right: 1px solid var(--line); border-radius: 0; background: transparent; color: var(--muted); }
 .tab.active { background: var(--bg); color: var(--text); }
 .tab-label { min-width: 0; flex: 1; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
@@ -115,6 +120,7 @@ button:disabled { opacity: .38; cursor: not-allowed; }
 .pane-slot[data-drop-direction="right"]::after { inset: 0 0 0 50%; }
 .pane-slot[data-drop-direction="top"]::after { inset: 0 0 50% 0; }
 .pane-slot[data-drop-direction="bottom"]::after { inset: 50% 0 0 0; }
+.pane-slot[data-drop-direction="center"]::after { inset: 8px; border-radius: 8px; background: #72d49233; }
 .dock-pane, .note-workspace, .canvas-workspace, .graph-workspace, .secondary-note-pane { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; background: var(--bg); }
 .secondary-panes { display: contents; }
 
