@@ -1,4 +1,4 @@
-import { Vault, rememberVault, recalledVault, rememberSettingsFolder, recalledSettingsFolder, safeName, dirname, basename } from './storage.js';
+import { Vault, rememberVault, recalledVault, rememberSettingsFolder, recalledSettingsFolder, safeName, dirname, basename } from './storage.js?v=16';
 import { renderMarkdown, extractHeadings, extractTags, extractLinks, buildIndex, noteStem, replaceWikiTarget, parseFrontmatter } from './markdown.js';
 import { GraphView } from './graph.js';
 import { CanvasView } from './canvas.js';
@@ -17,6 +17,8 @@ let rememberedHandle = null;
 let settingsFolderHandle = null;
 let index = null;
 let selectedPath = '';
+let inlineRenamePath = '';
+let fileClipboard = null;
 let currentPath = '';
 let currentType = '';
 let loadedModified = null;
@@ -388,6 +390,7 @@ async function chooseFromList(title, items, getLabel = item => item, placeholder
 function selectedFolder() {
   const selected = vault?.node(selectedPath);
   if (selected?.kind === 'directory') return selected.path;
+  if (selected?.kind === 'file') return selected.parentPath;
   const activePath = activeDocumentPath();
   if (activePath) return dirname(activePath);
   return '';
@@ -415,6 +418,8 @@ async function openVaultPicker() {
 
 async function loadVault(handle) {
   if (dirty || [...secondaryPanes.values()].some(pane => pane.dirty)) await saveAllPanes();
+  fileClipboard = null;
+  inlineRenamePath = '';
   vault = new Vault(handle);
   if (await vault.permission(true) !== 'granted') throw new Error('沒有筆記庫的讀寫權限');
   $('vaultState').textContent = '正在讀取…';
@@ -506,14 +511,39 @@ function appendTreeNode(node, parent, depth, query) {
   if (isHiddenAppFile(node)) return;
   if (!treeMatches(node, query)) return;
   const row = document.createElement('div');
-  row.className = `tree-row${node.path === selectedPath ? ' active' : ''}`;
+  const isRenaming = inlineRenamePath === node.path;
+  const isCut = fileClipboard?.mode === 'cut' && fileClipboard.path === node.path;
+  row.className = `tree-row${node.path === selectedPath ? ' active' : ''}${isCut ? ' cut' : ''}`;
   row.style.paddingLeft = `${6 + depth * 16}px`;
-  row.dataset.path = node.path; row.draggable = true; row.setAttribute('role', 'treeitem');
+  row.dataset.path = node.path; row.draggable = !isRenaming; row.setAttribute('role', 'treeitem');
+  if (node.kind === 'directory') row.setAttribute('aria-expanded', String(expanded.has(node.path) || Boolean(query)));
   const toggle = document.createElement('span'); toggle.className = 'tree-toggle';
   toggle.textContent = node.kind === 'directory' ? (expanded.has(node.path) || query ? '▾' : '▸') : '';
-  const icon = document.createElement('span'); icon.className = 'tree-icon';
-  icon.textContent = node.kind === 'directory' ? (expanded.has(node.path) || query ? '▾' : '▸') : node.ext === 'canvas' ? '◇' : node.ext === 'md' ? '▤' : '·';
-  const label = document.createElement('span'); label.className = 'tree-label'; label.textContent = node.name.replace(/\.(md|canvas)$/i, '');
+  const icon = document.createElement('span'); icon.className = `tree-icon${node.kind === 'directory' ? ' folder-icon' : ''}`;
+  icon.textContent = node.kind === 'directory' ? '' : node.ext === 'canvas' ? '◇' : node.ext === 'md' ? '▤' : '·';
+  const label = document.createElement(isRenaming ? 'input' : 'span');
+  label.className = isRenaming ? 'tree-rename-input' : 'tree-label';
+  const editableName = node.kind === 'file' && node.ext ? node.name.slice(0, -(node.ext.length + 1)) : node.name;
+  if (isRenaming) {
+    label.value = editableName;
+    label.setAttribute('aria-label', `重新命名 ${node.name}`);
+    let finished = false;
+    const finish = commit => {
+      if (finished) return;
+      finished = true;
+      const value = label.value;
+      inlineRenamePath = '';
+      if (commit) renamePath(node.path, value).then(target => { if (!target) renderTree(); });
+      else renderTree();
+    };
+    label.onpointerdown = label.onclick = label.ondblclick = event => event.stopPropagation();
+    label.onkeydown = event => {
+      event.stopPropagation();
+      if (event.key === 'Enter') { event.preventDefault(); finish(true); }
+      else if (event.key === 'Escape') { event.preventDefault(); finish(false); }
+    };
+    label.onblur = () => finish(true);
+  } else label.textContent = node.name.replace(/\.(md|canvas)$/i, '');
   row.append(toggle, icon, label);
   row.onclick = async event => {
     event.stopPropagation(); selectedPath = node.path;
@@ -524,7 +554,7 @@ function appendTreeNode(node, parent, depth, query) {
     persistVaultState();
     hideMobilePanels();
   };
-  row.ondblclick = event => { event.preventDefault(); renamePath(node.path); };
+  row.ondblclick = event => { event.preventDefault(); event.stopPropagation(); beginInlineRename(node.path); };
   row.oncontextmenu = event => { event.preventDefault(); selectedPath = node.path; persistVaultState(); renderTree(); showNodeMenu(node, event.clientX, event.clientY); };
   let longPress;
   row.addEventListener('pointerdown', event => { if (event.pointerType !== 'mouse') longPress = setTimeout(() => showNodeMenu(node, event.clientX, event.clientY), 600); });
@@ -568,6 +598,9 @@ function showNodeMenu(node, x, y) {
   else items.push({ label: '開啟', action: () => openPath(node.path) }, 'separator');
   items.push(
     { label: '重新命名', shortcut: settings.shortcuts.rename, action: () => renamePath(node.path) },
+    { label: '複製', shortcut: 'Ctrl+C', action: () => setFileClipboard('copy', node.path) },
+    { label: '剪下', shortcut: 'Ctrl+X', action: () => setFileClipboard('cut', node.path) },
+    ...(fileClipboard ? [{ label: '貼上', shortcut: 'Ctrl+V', action: () => pasteFileClipboard(node.kind === 'directory' ? node.path : node.parentPath) }] : []),
     { label: '移動到…', action: () => chooseMoveDestination(node.path) },
     { label: '在檔案總管中顯示', action: () => { expanded.add(node.parentPath); selectedPath = node.path; renderTree(); } },
     'separator', { label: '刪除', shortcut: 'Delete', danger: true, action: () => deletePath(node.path) }
@@ -601,25 +634,106 @@ async function createCanvas(parentPath = selectedFolder()) {
   catch (error) { toast(error.message, true); }
 }
 
+function beginInlineRename(path) {
+  if (!vault?.node(path)) return;
+  selectedPath = path;
+  inlineRenamePath = path;
+  for (let parent = dirname(path); parent; parent = dirname(parent)) expanded.add(parent);
+  renderTree();
+  persistVaultState();
+  requestAnimationFrame(() => {
+    const row = [...document.querySelectorAll('.tree-row')].find(item => item.dataset.path === path);
+    const input = row?.querySelector('.tree-rename-input');
+    input?.focus();
+    input?.select();
+  });
+}
+
 async function renamePath(path, explicitName = null) {
   if (!vault) return;
   const node = vault.node(path); if (!node) return;
-  const extension = node.kind === 'file' ? `.${node.ext}` : '';
-  const initial = node.kind === 'file' ? node.name.slice(0, -extension.length) : node.name;
-  const value = explicitName ?? await ask(`重新命名${node.kind === 'directory' ? '資料夾' : '檔案'}`, initial, `${settings.shortcuts.rename || '快捷鍵未設定'} 只是快捷鍵；平常可用右鍵、長按或直接修改筆記標題。`);
-  if (!value || safeName(value, extension) === node.name) return;
+  if (explicitName == null) { beginInlineRename(path); return null; }
+  const extension = node.kind === 'file' && node.ext ? `.${node.ext}` : '';
+  const value = String(explicitName).trim();
+  if (!value || safeName(value, extension) === node.name) return null;
   const oldStem = noteStem(node.name), newName = safeName(value, extension), newStem = noteStem(newName);
   try {
-    if (path === currentPath && dirty) await saveCurrent();
+    if (!await flushDirtyWithin(path)) return null;
     const target = await vault.rename(path, newName);
     if (node.kind === 'file' && node.ext === 'md' && settings.updateLinks) await updateLinksAfterRename(oldStem, newStem);
     tabs = tabs.map(tab => tab === path ? target : tab.startsWith(`${path}/`) ? `${target}${tab.slice(path.length)}` : tab);
     remapSecondaryPath(path, target);
+    remapFileClipboardPath(path, target);
+    remapExpandedPaths(path, target);
     if (currentPath === path || currentPath.startsWith(`${path}/`)) currentPath = `${target}${currentPath.slice(path.length)}`;
     selectedPath = target;
     await rebuildIndex(); renderTree(); renderTabs();
     if (currentPath === target) { $('documentTitle').value = noteStem(target); $('breadcrumbs').textContent = target; loadedModified = vault.node(target)?.lastModified; }
     toast(`已重新命名為「${basename(target)}」`);
+    return target;
+  } catch (error) { toast(error.message, true); return null; }
+}
+
+function setFileClipboard(mode, path) {
+  const node = vault?.node(path); if (!node) return;
+  fileClipboard = { mode, path, name: node.name, kind: node.kind };
+  selectedPath = path;
+  renderTree();
+  toast(`${mode === 'cut' ? '已剪下' : '已複製'}「${node.name}」；請選擇目的資料夾後貼上`);
+}
+
+function remapFileClipboardPath(source, target) {
+  if (!fileClipboard) return;
+  if (fileClipboard.path === source || fileClipboard.path.startsWith(`${source}/`)) fileClipboard.path = `${target}${fileClipboard.path.slice(source.length)}`;
+}
+
+function remapExpandedPaths(source, target) {
+  for (const path of [...expanded]) {
+    if (path !== source && !path.startsWith(`${source}/`)) continue;
+    expanded.delete(path);
+    expanded.add(`${target}${path.slice(source.length)}`);
+  }
+  persistSettings();
+}
+
+function pathContains(root, candidate) {
+  return Boolean(candidate) && (candidate === root || candidate.startsWith(`${root}/`));
+}
+
+async function flushDirtyWithin(path) {
+  if (dirty && pathContains(path, currentPath)) {
+    await saveCurrent();
+    if (dirty) return false;
+  }
+  for (const pane of secondaryPanes.values()) {
+    if (!pane.dirty || !pathContains(path, pane.path)) continue;
+    await pane.save();
+    if (pane.dirty) return false;
+  }
+  return true;
+}
+
+async function pasteFileClipboard(destination = selectedFolder()) {
+  if (!vault || !fileClipboard) return;
+  const source = vault.node(fileClipboard.path);
+  const targetFolder = vault.node(destination || '');
+  if (!source) { fileClipboard = null; renderTree(); return toast('原始項目已不存在', true); }
+  if (!targetFolder || targetFolder.kind !== 'directory') return toast('請先選擇目的資料夾', true);
+  if (!await flushDirtyWithin(source.path)) return toast('請先處理尚未儲存的內容', true);
+  if (fileClipboard.mode === 'cut') {
+    const target = await movePath(source.path, destination);
+    if (target) { fileClipboard = null; renderTree(); }
+    return;
+  }
+  try {
+    const target = await vault.copy(source.path, destination);
+    selectedPath = target;
+    expanded.add(destination);
+    if (vault.node(target)?.kind === 'directory') expanded.add(target);
+    await rebuildIndex();
+    renderTree();
+    persistVaultState();
+    toast(`已貼上「${basename(target)}」`);
   } catch (error) { toast(error.message, true); }
 }
 
@@ -640,13 +754,16 @@ async function chooseMoveDestination(path) {
 
 async function movePath(path, destination) {
   try {
-    if (path === currentPath && dirty) await saveCurrent();
+    if (!await flushDirtyWithin(path)) return null;
     const target = await vault.move(path, destination);
     tabs = tabs.map(tab => tab === path ? target : tab.startsWith(`${path}/`) ? `${target}${tab.slice(path.length)}` : tab);
     remapSecondaryPath(path, target);
+    remapFileClipboardPath(path, target);
+    remapExpandedPaths(path, target);
     if (currentPath === path || currentPath.startsWith(`${path}/`)) currentPath = `${target}${currentPath.slice(path.length)}`;
     selectedPath = target; expanded.add(destination); await rebuildIndex(); renderTree(); renderTabs(); toast(`已移動到「${destination || vault.name}」`);
-  } catch (error) { toast(error.message, true); }
+    return target;
+  } catch (error) { toast(error.message, true); return null; }
 }
 
 async function deletePath(path) {
@@ -655,6 +772,7 @@ async function deletePath(path) {
   try {
     const deletingCurrent = currentPath === path || currentPath.startsWith(`${path}/`);
     await vault.remove(path, settings.trashMode === 'trash');
+    if (fileClipboard && pathContains(path, fileClipboard.path)) fileClipboard = null;
     for (const pane of [...secondaryPanes.values()]) {
       const removedActive = pane.path === path || pane.path.startsWith(`${path}/`);
       pane.tabs = pane.tabs.filter(tabPath => tabPath !== path && !tabPath.startsWith(`${path}/`));
@@ -1241,7 +1359,9 @@ async function refreshVault() {
   if (dirty || [...secondaryPanes.values()].some(pane => pane.dirty)) await saveAllPanes(true);
   if (settingsFolderHandle) await loadSettingsFile(settingsFolderHandle);
   const previousModified = currentPath ? vault.node(currentPath)?.lastModified : null;
-  await vault.scan(); await rebuildIndex(); renderTree();
+  await vault.scan();
+  if (fileClipboard && !vault.node(fileClipboard.path)) fileClipboard = null;
+  await rebuildIndex(); renderTree();
   const current = vault.node(currentPath);
   if (current && previousModified && current.lastModified !== previousModified && !dirty) await openPath(currentPath, false, true);
   if (!current && currentPath) { tabs = tabs.filter(path => path !== currentPath); currentPath = ''; showView('welcome'); renderTabs(); }
@@ -1337,7 +1457,7 @@ $('collapseRight').onclick = () => { app.classList.add('right-collapsed'); app.c
 $('toggleRight').onclick = () => { if (innerWidth <= 1050) app.classList.toggle('right-open'); else app.classList.toggle('right-collapsed'); };
 $('openSettings').onclick = openSettings;
 $('vaultMenu').onclick = event => showMenu([{ label: vault ? '更換筆記庫' : '開啟筆記庫', action: openVaultPicker }, { label: '重新讀取', action: refreshVault }, { label: '設定', action: openSettings }], event.clientX, event.clientY);
-$('explorerMore').onclick = event => showMenu([{ label: '依名稱排序', action: renderTree }, { label: '全部展開', action: () => { vault && [...vault.nodes.values()].filter(n => n.kind === 'directory').forEach(n => expanded.add(n.path)); persistSettings(); renderTree(); } }, { label: '全部收合', action: () => { expanded.clear(); persistSettings(); renderTree(); } }], event.clientX, event.clientY);
+$('explorerMore').onclick = event => showMenu([{ label: '依名稱排序', action: renderTree }, ...(fileClipboard ? [{ label: '貼上到筆記庫根目錄', shortcut: 'Ctrl+V', action: () => pasteFileClipboard('') }, 'separator'] : []), { label: '全部展開', action: () => { vault && [...vault.nodes.values()].filter(n => n.kind === 'directory').forEach(n => expanded.add(n.path)); persistSettings(); renderTree(); } }, { label: '全部收合', action: () => { expanded.clear(); persistSettings(); renderTree(); } }], event.clientX, event.clientY);
 document.addEventListener('pointerdown', event => { if (!event.target.closest('#contextMenu,[data-menu-anchor]')) $('contextMenu').classList.add('hidden'); });
 
 $('editor').addEventListener('input', () => { scheduleSave(); if (viewMode !== 'edit') renderPreview(); renderRightPanel(); updateWikiSuggest(); });
@@ -1367,8 +1487,12 @@ $('chooseSettingsFolder').onclick = chooseSettingsFolder;
 
 addEventListener('keydown', event => {
   if (event.target.classList?.contains('shortcut-input')) return;
-  const typing = event.target.matches('input,textarea,[contenteditable]');
-  if (eventMatchesShortcut(event, settings.shortcuts.save)) { event.preventDefault(); const pane = activeSecondaryPane(); pane ? pane.save() : saveCurrent(); }
+  const typing = event.target.matches?.('input,textarea,[contenteditable]') || Boolean(event.target.closest?.('[contenteditable]'));
+  const clipboardShortcut = (event.ctrlKey || event.metaKey) && !event.altKey;
+  if (!typing && clipboardShortcut && event.key.toLowerCase() === 'c' && selectedPath) { event.preventDefault(); setFileClipboard('copy', selectedPath); }
+  else if (!typing && clipboardShortcut && event.key.toLowerCase() === 'x' && selectedPath) { event.preventDefault(); setFileClipboard('cut', selectedPath); }
+  else if (!typing && clipboardShortcut && event.key.toLowerCase() === 'v' && fileClipboard) { event.preventDefault(); pasteFileClipboard(); }
+  else if (eventMatchesShortcut(event, settings.shortcuts.save)) { event.preventDefault(); const pane = activeSecondaryPane(); pane ? pane.save() : saveCurrent(); }
   else if (eventMatchesShortcut(event, settings.shortcuts.close) && activeDocumentPath()) { event.preventDefault(); const pane = activeSecondaryPane(); pane ? closeSecondaryTab(pane, pane.path) : closeTab(currentPath); }
   else if (eventMatchesShortcut(event, settings.shortcuts.command)) { event.preventDefault(); openCommandPalette(); }
   else if (eventMatchesShortcut(event, settings.shortcuts.search)) { event.preventDefault(); $('fileSearch').focus(); }

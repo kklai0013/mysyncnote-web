@@ -72,7 +72,7 @@ async function copyFile(source, targetDir, targetName) {
   const file = await source.getFile();
   const target = await targetDir.getFileHandle(targetName, { create: true });
   const writer = await target.createWritable();
-  await writer.write(await file.arrayBuffer());
+  await writer.write(file);
   await writer.close();
   return target;
 }
@@ -291,6 +291,40 @@ export class Vault {
     await this.scan();
     if (cached != null) this.contents.set(targetPath, cached);
     return targetPath;
+  }
+
+  async copy(path, destinationPath) {
+    const node = this.node(path);
+    const destination = this.node(destinationPath);
+    if (!node || !path || !destination || destination.kind !== 'directory') throw new Error('找不到要複製的項目或目的資料夾');
+    if (node.kind === 'directory' && (destinationPath === path || destinationPath.startsWith(`${path}/`))) throw new Error('不能把資料夾複製到自己裡面');
+
+    const dot = node.kind === 'file' ? node.name.lastIndexOf('.') : -1;
+    const stem = dot > 0 ? node.name.slice(0, dot) : node.name;
+    const extension = dot > 0 ? node.name.slice(dot) : '';
+    const targetDir = await this.directory(destinationPath);
+    const existingNames = new Set();
+    for await (const entry of targetDir.values()) existingNames.add(entry.name.toLocaleLowerCase());
+    const nameExists = candidate => existingNames.has(candidate.toLocaleLowerCase());
+    let name = node.name;
+    if (nameExists(name)) {
+      name = `${stem} - 複本${extension}`;
+      let counter = 2;
+      while (nameExists(name)) name = `${stem} - 複本 ${counter++}${extension}`;
+    }
+
+    try {
+      if (node.kind === 'file') await copyFile(node.handle, targetDir, name);
+      else {
+        const created = await targetDir.getDirectoryHandle(name, { create: true });
+        await copyDirectory(node.handle, created);
+      }
+    } catch (error) {
+      try { await targetDir.removeEntry(name, { recursive: true }); } catch {}
+      throw error;
+    }
+    await this.scan();
+    return join(destinationPath, name);
   }
 
   async remove(path, useTrash = true) {

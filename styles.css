@@ -66,10 +66,15 @@ button:disabled { opacity: .38; cursor: not-allowed; }
 .tree-row { position: relative; height: 31px; padding-right: 6px; display: flex; align-items: center; gap: 4px; border-radius: 6px; color: #d8dce1; }
 .tree-row:hover { background: var(--hover); }
 .tree-row.active { background: var(--active); color: var(--accent); }
+.tree-row.cut { opacity: .48; }
 .tree-row.drop-target { outline: 1px solid var(--accent); background: var(--accent-2); }
 .tree-toggle { width: 20px; height: 28px; display: grid; place-items: center; color: var(--muted); font-size: 11px; }
 .tree-icon { width: 18px; text-align: center; color: #c2c8ce; font-size: 13px; }
+.tree-icon.folder-icon { position: relative; height: 17px; }
+.tree-icon.folder-icon::before { content: ""; position: absolute; left: 2px; top: 6px; width: 14px; height: 10px; border-radius: 2px; background: #c7a94b; }
+.tree-icon.folder-icon::after { content: ""; position: absolute; left: 3px; top: 3px; width: 7px; height: 5px; border-radius: 2px 2px 0 0; background: #d8bd63; }
 .tree-label { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-rename-input { min-width: 0; height: 24px; flex: 1; padding: 1px 4px; border: 1px solid #5aa7e8; border-radius: 2px; outline: 0; background: #101419; color: var(--text); }
 .sidebar-footer { flex: 0 0 auto; padding: 8px; display: flex; gap: 6px; border-top: 1px solid var(--line); }
 .footer-action { min-width: 0; flex: 1; display: flex; align-items: center; gap: 8px; border: 0; background: transparent; text-align: left; }
 .footer-action span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
