@@ -1,7 +1,7 @@
 import { Vault, rememberVault, recalledVault, rememberSettingsFolder, recalledSettingsFolder, safeName, dirname, basename } from './storage.js?v=16';
 import { renderMarkdown, extractHeadings, extractTags, extractLinks, buildIndex, noteStem, replaceWikiTarget, parseFrontmatter } from './markdown.js';
 import { GraphView } from './graph.js';
-import { CanvasView } from './canvas.js';
+import { CanvasView } from './canvas.js?v=17';
 import { LiveMarkdownEditor } from './live-editor.js';
 
 const $ = id => document.getElementById(id);
@@ -1332,6 +1332,8 @@ const graph = new GraphView($('graphCanvas'), path => openPath(path));
 const canvasView = new CanvasView({
   viewport: $('canvasViewport'), surface: $('canvasSurface'), nodesLayer: $('canvasNodes'), edgesLayer: $('canvasEdges'),
   onChange: () => { if (currentType === 'canvas' && currentCanvasValid) scheduleSave(); }, onOpenNote: path => openPath(path),
+  onOpenTextLink: (target, kind) => { const node = kind === 'wiki' ? index?.resolve(target, currentPath) : resolveAsset(target, currentPath); if (node) openPath(node.path); },
+  onTag: searchTag,
   onViewChange: (state, key) => { if (key) writeCanvasViewState(key, state); },
   chooseNote: async () => {
     if (!index?.entries.length) return null;

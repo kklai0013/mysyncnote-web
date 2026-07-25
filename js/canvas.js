@@ -1,3 +1,5 @@
+import { LiveMarkdownEditor } from './live-editor.js';
+
 const uid = prefix => `${prefix}-${crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2)}`;
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -5,8 +7,8 @@ const COLORS = ['', '1', '2', '3', '4', '5', '6'];
 const COLOR_VALUES = { '1': '#e57373', '2': '#ffb25c', '3': '#e1cb62', '4': '#6dca87', '5': '#56c8d8', '6': '#b08ae5' };
 
 export class CanvasView {
-  constructor({ viewport, surface, nodesLayer, edgesLayer, onChange, onOpenNote, chooseNote, onViewChange }) {
-    Object.assign(this, { viewport, surface, nodesLayer, edgesLayer, onChange, onOpenNote, chooseNote, onViewChange });
+  constructor({ viewport, surface, nodesLayer, edgesLayer, onChange, onOpenNote, onOpenTextLink, onTag, chooseNote, onViewChange }) {
+    Object.assign(this, { viewport, surface, nodesLayer, edgesLayer, onChange, onOpenNote, onOpenTextLink, onTag, chooseNote, onViewChange });
     this.data = { nodes: [], edges: [] };
     this.metadata = {};
     this.scale = 1; this.pan = { x: 120, y: 90 };
@@ -162,11 +164,23 @@ export class CanvasView {
     } else {
       const content = document.createElement('div'); content.className = 'canvas-node-content';
       if (node.type === 'text') {
-        const textarea = document.createElement('textarea'); textarea.value = node.text || '';
+        content.classList.add('text-live');
+        const liveContainer = document.createElement('div'); liveContainer.className = 'canvas-text-live live-editor';
         let remembered = false;
-        textarea.addEventListener('focus', () => { if (!this.selected.has(node.id)) { this.selected = new Set([node.id]); this.#selectionClasses(); } });
-        textarea.addEventListener('input', () => { if (!remembered) { this.#remember(); remembered = true; } node.text = textarea.value; this.#changed(); });
-        textarea.addEventListener('blur', () => { remembered = false; }); content.append(textarea);
+        const liveEditor = new LiveMarkdownEditor(liveContainer, {
+          onChange: source => {
+            if (!remembered) { this.#remember(); remembered = true; }
+            node.text = source;
+            this.#changed();
+          },
+          onLink: target => this.onOpenTextLink?.(target, 'wiki'),
+          onFileLink: target => this.onOpenTextLink?.(target, 'file'),
+          onTag: tag => this.onTag?.(tag)
+        });
+        liveEditor.setValue(node.text || '');
+        liveContainer.addEventListener('focus', () => { if (!this.selected.has(node.id)) { this.selected = new Set([node.id]); this.#selectionClasses(); } });
+        liveContainer.addEventListener('blur', () => { remembered = false; });
+        content.append(liveContainer);
       } else if (node.type === 'file') {
         content.innerHTML = '<p>筆記卡片</p><b></b><p class="hint">雙擊開啟完整筆記</p>'; content.querySelector('b').textContent = node.file || '找不到筆記'; content.ondblclick = () => this.onOpenNote?.(node.file);
       } else if (node.type === 'link') {
@@ -181,7 +195,7 @@ export class CanvasView {
   }
 
   #nodePointerDown(event, node, element) {
-    if (event.target.closest('textarea,a')) return;
+    if (event.target.closest('textarea,a,[contenteditable]')) return;
     const port = event.target.closest('.canvas-port');
     if (port) { event.preventDefault(); event.stopPropagation(); this.#startConnection(event, node, port.dataset.side); return; }
     const resizing = Boolean(event.target.closest('.canvas-resize'));
