@@ -25,6 +25,7 @@
         <button id="newNote" class="icon-btn" title="新增筆記" aria-label="新增筆記">＋頁</button>
         <button id="newFolder" class="icon-btn" title="新增資料夾" aria-label="新增資料夾">＋夾</button>
         <button id="newCanvas" class="icon-btn" title="新增 Canvas" aria-label="新增 Canvas">＋圖</button>
+        <button id="newTimeline" class="icon-btn" title="新增時間線" aria-label="新增時間線">＋時</button>
         <button id="refreshVault" class="icon-btn" title="重新讀取筆記庫" aria-label="重新讀取筆記庫">↻</button>
         <button id="explorerMore" class="icon-btn" title="更多" aria-label="更多選項">•••</button>
       </div>
@@ -61,7 +62,7 @@
         <div class="welcome-card">
           <div class="welcome-mark">M</div>
           <h1 id="welcomeTitle">你的 Markdown 筆記庫</h1>
-          <p id="welcomeMessage">直接開啟電腦或手機上的資料夾。筆記保持為一般的 <code>.md</code>、附件和 <code>.canvas</code> 檔案。</p>
+          <p id="welcomeMessage">直接開啟電腦或手機上的資料夾。筆記保持為一般的 <code>.md</code>、附件、<code>.canvas</code> 和 <code>.timeline</code> 檔案。</p>
           <button id="welcomeOpen" class="primary large">開啟筆記庫</button>
           <p class="hint">FolderSync 或其他工具可以同步這個資料夾；MySyncNote 不需要 Google API。</p>
         </div>
@@ -152,6 +153,50 @@
           <div class="canvas-help">框選多張卡片 · Shift 點選多個 · 從卡片圓點直接拉線 · Space＋拖曳平移</div>
         </div>
       </section>
+
+      <section id="timelineWorkspace" class="timeline-workspace hidden dock-pane timeline-pane" tabindex="-1">
+        <header class="special-toolbar timeline-toolbar">
+          <div class="special-title timeline-title-block">
+            <input id="timelineTitle" class="timeline-title-input" value="時間線" aria-label="時間線檔名" spellcheck="false">
+            <span id="timelineState">已儲存</span>
+          </div>
+          <div class="timeline-view-switch view-switch" role="tablist" aria-label="時間線檢視">
+            <button data-timeline-view="chronology" class="active">實際時間</button>
+            <button data-timeline-view="narrative">敘事順序</button>
+            <button data-timeline-view="branches">分支／方案</button>
+          </div>
+          <div class="timeline-toolbar-actions">
+            <button id="timelineAddEvent">＋事件</button>
+            <button id="timelineAddSimultaneous" title="建立會和選取事件同時發生、可以共存的另一件事">＋同時</button>
+            <button id="timelineAddTrack">＋軌道</button>
+            <button id="timelineAddVariant" title="為選取事件建立互斥的 A／B／C 方案">＋方案</button>
+            <button id="timelineAddBranch" title="從選取事件建立會繼續發展的時間分支">＋分支</button>
+            <button id="timelineAddChapter" class="hidden">＋章節</button>
+            <button id="timelinePlaceSelected" class="hidden">放入敘事</button>
+            <button id="timelineUndo" title="復原（Ctrl+Z）">↶</button>
+            <button id="timelineRedo" title="重做（Ctrl+Y）">↷</button>
+            <button id="timelineZoomOut" title="縮小">−</button>
+            <button id="timelineZoomReset" title="重設縮放"><span id="timelineZoomLabel">100%</span></button>
+            <button id="timelineZoomIn" title="放大">＋</button>
+          </div>
+          <button id="timelineToggleInspector" class="icon-btn" title="顯示時間線結構或事件內容" aria-label="顯示時間線結構或事件內容">☷</button>
+          <button id="closeTimeline" class="icon-btn close-pane" title="關閉目前時間線" aria-label="關閉目前時間線">×</button>
+        </header>
+        <div class="timeline-filterbar">
+          <label class="search-box compact">
+            <span>⌕</span>
+            <input id="timelineSearch" type="search" placeholder="搜尋事件、描述、標籤或筆記" autocomplete="off">
+          </label>
+          <select id="timelineStatusFilter" aria-label="依狀態篩選"><option value="all">所有狀態</option></select>
+          <select id="timelineBranchFilter" aria-label="依分支篩選"><option value="all">所有分支</option></select>
+          <select id="timelineTrackFilter" aria-label="依軌道篩選"><option value="all">所有軌道</option></select>
+        </div>
+        <div class="timeline-shell">
+          <main id="timelineStage" class="timeline-stage"></main>
+          <aside id="timelineInspector" class="timeline-inspector" aria-label="時間線事件內容"></aside>
+        </div>
+        <div id="timelineError" class="timeline-error hidden" role="alert"></div>
+      </section>
       </div>
     </main>
 
@@ -167,6 +212,10 @@
     </aside>
   </div>
 
+  <div id="fileOperationOverlay" class="file-operation-overlay hidden" role="status" aria-live="polite">
+    <span class="busy-spinner" aria-hidden="true"></span>
+    <strong id="fileOperationMessage">正在安全處理檔案…</strong>
+  </div>
   <div id="contextMenu" class="context-menu hidden" role="menu"></div>
   <dialog id="inputDialog" class="dialog">
     <form method="dialog">

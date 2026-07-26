@@ -1,7 +1,7 @@
-const CACHE = 'mysyncnote-v17';
+const CACHE = 'mysyncnote-v18';
 const SHELL = [
   './', './index.html', './styles.css', './manifest.webmanifest', './icon.svg',
-  './js/app.js', './js/storage.js?v=16', './js/markdown.js', './js/live-editor.js', './js/graph.js', './js/canvas.js?v=17'
+  './js/app.js', './js/storage.js?v=18', './js/markdown.js', './js/live-editor.js', './js/graph.js', './js/canvas.js?v=17', './js/timeline.js?v=18'
 ];
 
 self.addEventListener('install', event => {
@@ -14,9 +14,22 @@ self.addEventListener('activate', event => {
 
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
-  event.respondWith(fetch(event.request).then(response => {
+  const url = new URL(event.request.url);
+  if (url.origin !== self.location.origin) return;
+  const network = fetch(event.request);
+  event.waitUntil(network.then(async response => {
+    if (!response.ok) return;
     const copy = response.clone();
-    caches.open(CACHE).then(cache => cache.put(event.request, copy));
-    return response;
-  }).catch(() => caches.match(event.request).then(cached => cached || caches.match('./index.html'))));
+    const cache = await caches.open(CACHE);
+    await cache.put(event.request, copy);
+  }).catch(() => {}));
+  event.respondWith(network.catch(async () => {
+    const cached = await caches.match(event.request);
+    if (cached) return cached;
+    if (event.request.mode === 'navigate') {
+      const shell = await caches.match('./index.html');
+      if (shell) return shell;
+    }
+    return new Response('離線且沒有可用的快取', { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+  }));
 });

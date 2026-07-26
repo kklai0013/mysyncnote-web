@@ -68,9 +68,10 @@ function join(...parts) {
   return parts.filter(Boolean).join('/').replace(/\/+/g, '/').replace(/^\//, '');
 }
 
-async function copyFile(source, targetDir, targetName) {
+async function copyFile(source, targetDir, targetName, onTarget = null) {
   const file = await source.getFile();
   const target = await targetDir.getFileHandle(targetName, { create: true });
+  onTarget?.();
   const writer = await target.createWritable();
   await writer.write(file);
   await writer.close();
@@ -137,6 +138,7 @@ export class Vault {
   node(path) { return this.nodes.get(path) || null; }
   markdownNodes() { return [...this.nodes.values()].filter(node => node.kind === 'file' && node.ext === 'md'); }
   canvasNodes() { return [...this.nodes.values()].filter(node => node.kind === 'file' && node.ext === 'canvas'); }
+  timelineNodes() { return [...this.nodes.values()].filter(node => node.kind === 'file' && node.ext === 'timeline'); }
 
   async directory(path = '') {
     let handle = this.handle;
@@ -163,10 +165,25 @@ export class Vault {
   }
 
   async writeText(path, text, expectedModified = null) {
-    const parent = await this.directory(dirname(path));
-    const handle = await parent.getFileHandle(basename(path), { create: true });
+    const guarded = expectedModified != null;
+    let parent;
+    let handle;
+    try {
+      parent = await this.directory(dirname(path));
+      handle = guarded
+        ? await parent.getFileHandle(basename(path))
+        : await parent.getFileHandle(basename(path), { create: true });
+    } catch (cause) {
+      if (!guarded || cause.name !== 'NotFoundError') throw cause;
+      const error = new Error('這份筆記已被其他程式刪除');
+      error.name = 'ExternalChangeError';
+      error.externalText = '';
+      error.externalModified = null;
+      error.externalDeleted = true;
+      throw error;
+    }
     const before = await handle.getFile();
-    if (expectedModified && before.lastModified !== expectedModified) {
+    if (guarded && before.lastModified !== expectedModified) {
       const error = new Error('這份筆記已被其他程式修改');
       error.name = 'ExternalChangeError';
       error.externalText = await before.text();
@@ -231,6 +248,30 @@ export class Vault {
     return this.node(join(parentPath, name));
   }
 
+  async createTimeline(parentPath = '', desired = '未命名時間線.timeline', initial = '') {
+    const dir = await this.directory(parentPath);
+    const name = await this.uniqueName(parentPath, safeName(desired, '.timeline'));
+    const handle = await dir.getFileHandle(name, { create: true });
+    const content = initial || JSON.stringify({
+      format: 'mysyncnote-timeline',
+      version: 1,
+      title: name.replace(/\.timeline$/i, ''),
+      tracks: [{ id: 'track-main', name: '主線', color: '#78dba0', order: 0 }],
+      branches: [{ id: 'main', name: '主時間線', parentId: null, fromEventId: null, color: '#78dba0', order: 0 }],
+      variantGroups: [],
+      events: [],
+      narrativeSections: [{ id: 'section-main', title: '故事', order: 0 }],
+      narrativeItems: [],
+      relations: []
+    }, null, 2);
+    const writer = await handle.createWritable();
+    await writer.write(content.endsWith('\n') ? content : `${content}\n`);
+    await writer.close();
+    await this.scan();
+    this.contents.set(join(parentPath, name), content.endsWith('\n') ? content : `${content}\n`);
+    return this.node(join(parentPath, name));
+  }
+
   async createFolder(parentPath = '', desired = '新資料夾') {
     const parent = await this.directory(parentPath);
     let name = safeName(desired);
@@ -257,12 +298,21 @@ export class Vault {
     const targetPath = join(node.parentPath, name);
     if (targetPath === path) return targetPath;
     if (this.node(targetPath)) throw new Error('同一個位置已經有相同名稱');
-    if (node.kind === 'file') await copyFile(node.handle, parent, name);
-    else {
-      const target = await parent.getDirectoryHandle(name, { create: true });
-      await copyDirectory(node.handle, target);
+    let targetCreated = false;
+    try {
+      if (node.kind === 'file') await copyFile(node.handle, parent, name, () => { targetCreated = true; });
+      else {
+        const target = await parent.getDirectoryHandle(name, { create: true });
+        targetCreated = true;
+        await copyDirectory(node.handle, target);
+      }
+      await parent.removeEntry(node.name, { recursive: true });
+    } catch (error) {
+      if (targetCreated) {
+        try { await parent.removeEntry(name, { recursive: true }); } catch {}
+      }
+      throw error;
     }
-    await parent.removeEntry(node.name, { recursive: true });
     const cached = this.contents.get(path);
     this.contents.delete(path);
     await this.scan();
@@ -279,13 +329,22 @@ export class Vault {
     const targetPath = join(destinationPath, node.name);
     if (this.node(targetPath)) throw new Error('目的地已經有相同名稱');
     const targetDir = await this.directory(destinationPath);
-    if (node.kind === 'file') await copyFile(node.handle, targetDir, node.name);
-    else {
-      const created = await targetDir.getDirectoryHandle(node.name, { create: true });
-      await copyDirectory(node.handle, created);
+    let targetCreated = false;
+    try {
+      if (node.kind === 'file') await copyFile(node.handle, targetDir, node.name, () => { targetCreated = true; });
+      else {
+        const created = await targetDir.getDirectoryHandle(node.name, { create: true });
+        targetCreated = true;
+        await copyDirectory(node.handle, created);
+      }
+      const sourceParent = await this.directory(node.parentPath);
+      await sourceParent.removeEntry(node.name, { recursive: true });
+    } catch (error) {
+      if (targetCreated) {
+        try { await targetDir.removeEntry(node.name, { recursive: true }); } catch {}
+      }
+      throw error;
     }
-    const sourceParent = await this.directory(node.parentPath);
-    await sourceParent.removeEntry(node.name, { recursive: true });
     const cached = this.contents.get(path);
     this.contents.delete(path);
     await this.scan();
@@ -313,14 +372,18 @@ export class Vault {
       while (nameExists(name)) name = `${stem} - 複本 ${counter++}${extension}`;
     }
 
+    let targetCreated = false;
     try {
-      if (node.kind === 'file') await copyFile(node.handle, targetDir, name);
+      if (node.kind === 'file') await copyFile(node.handle, targetDir, name, () => { targetCreated = true; });
       else {
         const created = await targetDir.getDirectoryHandle(name, { create: true });
+        targetCreated = true;
         await copyDirectory(node.handle, created);
       }
     } catch (error) {
-      try { await targetDir.removeEntry(name, { recursive: true }); } catch {}
+      if (targetCreated) {
+        try { await targetDir.removeEntry(name, { recursive: true }); } catch {}
+      }
       throw error;
     }
     await this.scan();

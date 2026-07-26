@@ -1,8 +1,9 @@
-import { Vault, rememberVault, recalledVault, rememberSettingsFolder, recalledSettingsFolder, safeName, dirname, basename } from './storage.js?v=16';
+import { Vault, rememberVault, recalledVault, rememberSettingsFolder, recalledSettingsFolder, safeName, dirname, basename } from './storage.js?v=18';
 import { renderMarkdown, extractHeadings, extractTags, extractLinks, buildIndex, noteStem, replaceWikiTarget, parseFrontmatter } from './markdown.js';
 import { GraphView } from './graph.js';
 import { CanvasView } from './canvas.js?v=17';
 import { LiveMarkdownEditor } from './live-editor.js';
+import { TimelineView, createEmptyTimeline } from './timeline.js?v=18';
 
 const $ = id => document.getElementById(id);
 const app = $('app');
@@ -25,8 +26,12 @@ let loadedModified = null;
 let dirty = false;
 let editRevision = 0;
 let currentCanvasValid = true;
+let currentTimelineValid = true;
 let autoSaveTimer = null;
 let saveChain = Promise.resolve();
+let saveGeneration = 0;
+let openGeneration = 0;
+let fileOperationDepth = 0;
 let indexingTimer = null;
 let rightPanel = 'outline';
 let viewMode = localStorage.getItem('mysyncnote-view') || 'live';
@@ -102,13 +107,18 @@ async function loadSettingsFile(handle) {
 
 async function chooseSettingsFolder() {
   if (!window.showDirectoryPicker) return toast('這個瀏覽器不能選擇設定檔資料夾', true);
+  beginFileOperation('正在選擇設定檔資料夾…');
   try {
     const handle = await showDirectoryPicker({ mode: 'readwrite' });
     settingsFolderHandle = handle;
     await rememberSettingsFolder(handle);
     await writeSettingsFile();
     toast(`設定檔會儲存在「${handle.name}」`);
-  } catch (error) { if (error.name !== 'AbortError') toast(error.message, true); }
+  } catch (error) {
+    if (error.name !== 'AbortError') toast(error.message, true);
+  } finally {
+    endFileOperation();
+  }
 }
 
 function toast(message, error = false) {
@@ -119,24 +129,64 @@ function toast(message, error = false) {
   toast.timer = setTimeout(() => element.classList.add('hidden'), error ? 6000 : 3200);
 }
 
+function beginFileOperation(message = '正在安全處理檔案…') {
+  if (fileOperationDepth === 0) {
+    $('contextMenu').classList.add('hidden');
+    openGeneration += 1;
+    setPrimaryLoading(false);
+    for (const pane of secondaryPanes.values()) {
+      pane.openGeneration += 1;
+      pane.element.inert = false;
+      pane.element.classList.remove('loading');
+    }
+  }
+  fileOperationDepth += 1;
+  $('fileOperationMessage').textContent = message;
+  $('fileOperationOverlay').classList.remove('hidden');
+  app.inert = true;
+  app.setAttribute('aria-busy', 'true');
+}
+
+function endFileOperation() {
+  fileOperationDepth = Math.max(0, fileOperationDepth - 1);
+  if (fileOperationDepth) return;
+  app.inert = false;
+  app.removeAttribute('aria-busy');
+  $('fileOperationOverlay').classList.add('hidden');
+}
+
+function setPrimaryLoading(loading) {
+  const body = document.querySelector('.primary-editor-group .editor-group-body');
+  if (!body) return;
+  body.inert = loading;
+  body.classList.toggle('loading', loading);
+}
+
 function setSaveState(text, error = false) {
   $('saveState').textContent = text;
   $('saveState').classList.toggle('error', error);
   $('canvasState').textContent = text;
+  $('timelineState').textContent = text;
 }
 
 function updateWelcome() {
   const opened = Boolean(vault);
   $('welcomeTitle').textContent = opened ? '沒有開啟的筆記' : '你的 Markdown 筆記庫';
-  $('welcomeMessage').innerHTML = opened ? '從左側選擇筆記或 Canvas，或建立一篇新筆記。' : '直接開啟電腦或手機上的資料夾。筆記保持為一般的 <code>.md</code>、附件和 <code>.canvas</code> 檔案。';
+  $('welcomeMessage').innerHTML = opened ? '從左側選擇筆記、Canvas 或時間線，或建立一篇新筆記。' : '直接開啟電腦或手機上的資料夾。筆記保持為一般的 <code>.md</code>、附件、<code>.canvas</code> 和 <code>.timeline</code> 檔案。';
   $('welcomeOpen').textContent = opened ? '新增筆記' : '開啟筆記庫';
   $('welcomeOpen').onclick = () => opened ? createNote() : openVaultPicker();
+}
+
+function primaryViewForType(type = currentType) {
+  if (type === 'canvas') return 'canvas';
+  if (type === 'timeline') return 'timeline';
+  return currentPath ? 'note' : 'welcome';
 }
 
 function showView(name) {
   if (name === 'graph') {
     graphDocked = true;
-    name = currentType === 'canvas' ? 'canvas' : currentPath ? 'note' : 'graph';
+    name = currentPath ? primaryViewForType() : 'graph';
   }
   currentView = name;
   const workspaceVisible = name !== 'welcome' || graphDocked || secondaryPanes.size > 0;
@@ -144,6 +194,7 @@ function showView(name) {
   $('workspaceDock').classList.toggle('hidden', !workspaceVisible);
   $('noteWorkspace').classList.toggle('hidden', name !== 'note');
   $('canvasWorkspace').classList.toggle('hidden', name !== 'canvas');
+  $('timelineWorkspace').classList.toggle('hidden', name !== 'timeline');
   $('graphWorkspace').classList.toggle('hidden', !graphDocked);
   const activePath = activeDocumentPath();
   $('splitCurrent').disabled = !activePath || vault?.node(activePath)?.ext !== 'md';
@@ -162,7 +213,7 @@ function initPaneLayout() {
   const primary = createPaneSlot('primary');
   const primaryGroup = document.createElement('section'); primaryGroup.className = 'editor-group primary-editor-group dock-pane'; primaryGroup.dataset.groupId = 'primary';
   const primaryBody = document.createElement('div'); primaryBody.className = 'editor-group-body';
-  $('tabs').classList.add('group-tabs'); primaryBody.append($('noteWorkspace'), $('canvasWorkspace')); primaryGroup.append($('tabs'), primaryBody); primary.append(primaryGroup);
+  $('tabs').classList.add('group-tabs'); primaryBody.append($('noteWorkspace'), $('canvasWorkspace'), $('timelineWorkspace')); primaryGroup.append($('tabs'), primaryBody); primary.append(primaryGroup);
   paneParking.append(graphWorkspace);
   paneLayoutTree = primary;
   dock.innerHTML = '';
@@ -401,6 +452,7 @@ async function openVaultPicker() {
     toast('這個瀏覽器不能直接開啟資料夾。請使用最新版 Chrome 或 Edge，並從 HTTPS 網址開啟。', true);
     return;
   }
+  beginFileOperation('正在選擇筆記庫…');
   try {
     let handle;
     if (rememberedHandle) {
@@ -408,59 +460,84 @@ async function openVaultPicker() {
       if (permission === 'granted') handle = rememberedHandle;
     }
     if (!handle) handle = await showDirectoryPicker({ mode: 'readwrite' });
+    await loadVault(handle);
     await rememberVault(handle);
     rememberedHandle = null;
-    await loadVault(handle);
   } catch (error) {
     if (error.name !== 'AbortError') toast(`${error.name}: ${error.message}`, true);
+  } finally {
+    endFileOperation();
   }
 }
 
 async function loadVault(handle) {
-  if (dirty || [...secondaryPanes.values()].some(pane => pane.dirty)) await saveAllPanes();
-  fileClipboard = null;
-  inlineRenamePath = '';
-  vault = new Vault(handle);
-  if (await vault.permission(true) !== 'granted') throw new Error('沒有筆記庫的讀寫權限');
-  $('vaultState').textContent = '正在讀取…';
-  await vault.scan();
-  $('vaultName').textContent = vault.name;
-  $('vaultState').textContent = '本機筆記庫';
-  $('openVaultText').textContent = '更換筆記庫';
-  $('settingsVault').textContent = vault.name;
-  localStorage.setItem('mysyncnote-vault-name', vault.name);
-  await rebuildIndex();
-  const previous = readVaultState();
-  if (['live', 'edit', 'split', 'read'].includes(previous.viewMode)) {
-    viewMode = previous.viewMode;
-    localStorage.setItem('mysyncnote-view', viewMode);
+  beginFileOperation(`正在開啟「${handle.name}」…`);
+  try {
+    if (dirty || [...secondaryPanes.values()].some(pane => pane.dirty)) {
+      await saveAllPanes();
+      if (dirty || [...secondaryPanes.values()].some(pane => pane.dirty)) throw new Error('仍有內容尚未儲存；請先處理衝突，再更換筆記庫');
+    }
+    const nextVault = new Vault(handle);
+    if (await nextVault.permission(true) !== 'granted') throw new Error('沒有筆記庫的讀寫權限');
+    $('vaultState').textContent = '正在讀取…';
+    await nextVault.scan();
+    saveGeneration += 1;
+    openGeneration += 1;
+    clearTimeout(autoSaveTimer);
+    fileClipboard = null;
+    inlineRenamePath = '';
+    currentPath = '';
+    currentType = '';
+    loadedModified = null;
+    dirty = false;
+    editRevision = 0;
+    currentCanvasValid = true;
+    currentTimelineValid = true;
+    tabs = [];
+    history = [];
+    historyIndex = -1;
+    vault = nextVault;
+    $('vaultName').textContent = vault.name;
+    $('vaultState').textContent = '本機筆記庫';
+    $('openVaultText').textContent = '更換筆記庫';
+    $('settingsVault').textContent = vault.name;
+    localStorage.setItem('mysyncnote-vault-name', vault.name);
+    await rebuildIndex();
+    const previous = readVaultState();
+    if (['live', 'edit', 'split', 'read'].includes(previous.viewMode)) {
+      viewMode = previous.viewMode;
+      localStorage.setItem('mysyncnote-view', viewMode);
+    }
+    selectedPath = vault.node(previous.selectedPath) && !isHiddenAppFile(vault.node(previous.selectedPath)) ? previous.selectedPath : '';
+    tabs = (previous.tabs || []).filter(path => vault.node(path));
+    secondaryGroupStates = (previous.secondaryGroups || (previous.secondaryPanePaths || []).map((path, index) => ({ id: `legacy-${index}`, path, tabs: [path], mode: 'live' })))
+      .map((group, index) => ({ id: String(group.id || `group-${index}`), path: group.path, tabs: (group.tabs || [group.path]).filter(path => vault.node(path)?.ext === 'md'), mode: ['live', 'edit', 'split', 'read'].includes(group.mode) ? group.mode : 'live' }))
+      .filter(group => group.tabs.length && vault.node(group.path)?.ext === 'md');
+    graphDocked = Boolean(previous.graphDocked);
+    pendingLayoutModel = previous.layoutVersion === LAYOUT_VERSION ? previous.layout || null : null;
+    if (selectedPath) for (let path = selectedPath; path; path = dirname(path)) expanded.add(path);
+    renderTree();
+    if (vault.node(previous.currentPath)?.kind === 'file') {
+      await openPath(previous.currentPath, false, true);
+    } else if (tabs.length) {
+      await openPath(tabs[0], false, true);
+    } else {
+      const candidates = [...vault.markdownNodes(), ...vault.canvasNodes(), ...vault.timelineNodes()];
+      const first = candidates[0];
+      if (first) await openPath(first.path, true, true);
+      else showView('welcome');
+    }
+    await restoreSecondaryPanes();
+    if (pendingLayoutModel) restorePaneLayout(pendingLayoutModel);
+    else if (graphDocked && !$('graphWorkspace').closest('.pane-slot')) insertPane($('graphWorkspace'), 'graph', 'right', activePaneSlot);
+    showView(currentView);
+    persistVaultState();
+    renderTabs();
+    toast(`已開啟筆記庫「${vault.name}」`);
+  } finally {
+    setPrimaryLoading(false);
+    endFileOperation();
   }
-  selectedPath = vault.node(previous.selectedPath) && !isHiddenAppFile(vault.node(previous.selectedPath)) ? previous.selectedPath : '';
-  tabs = (previous.tabs || []).filter(path => vault.node(path));
-  secondaryGroupStates = (previous.secondaryGroups || (previous.secondaryPanePaths || []).map((path, index) => ({ id: `legacy-${index}`, path, tabs: [path], mode: 'live' })))
-    .map((group, index) => ({ id: String(group.id || `group-${index}`), path: group.path, tabs: (group.tabs || [group.path]).filter(path => vault.node(path)?.ext === 'md'), mode: ['live', 'edit', 'split', 'read'].includes(group.mode) ? group.mode : 'live' }))
-    .filter(group => group.tabs.length && vault.node(group.path)?.ext === 'md');
-  graphDocked = Boolean(previous.graphDocked);
-  pendingLayoutModel = previous.layoutVersion === LAYOUT_VERSION ? previous.layout || null : null;
-  if (selectedPath) for (let path = selectedPath; path; path = dirname(path)) expanded.add(path);
-  renderTree();
-  if (vault.node(previous.currentPath)?.kind === 'file') {
-    await openPath(previous.currentPath, false, true);
-  } else if (tabs.length) {
-    await openPath(tabs[0], false, true);
-  } else {
-    const candidates = [...vault.markdownNodes(), ...vault.canvasNodes()];
-    const first = candidates[0];
-    if (first) await openPath(first.path, true, true);
-    else showView('welcome');
-  }
-  await restoreSecondaryPanes();
-  if (pendingLayoutModel) restorePaneLayout(pendingLayoutModel);
-  else if (graphDocked && !$('graphWorkspace').closest('.pane-slot')) insertPane($('graphWorkspace'), 'graph', 'right', activePaneSlot);
-  showView(currentView);
-  persistVaultState();
-  renderTabs();
-  toast(`已開啟筆記庫「${vault.name}」`);
 }
 
 async function rebuildIndex() {
@@ -471,6 +548,7 @@ async function rebuildIndex() {
     catch (error) { console.warn('索引失敗', node.path, error); }
   }
   index = buildIndex(entries);
+  if (currentType === 'timeline') timelineView.setNotes(index.entries);
   renderRightPanel();
 }
 
@@ -520,7 +598,7 @@ function appendTreeNode(node, parent, depth, query) {
   const toggle = document.createElement('span'); toggle.className = 'tree-toggle';
   toggle.textContent = node.kind === 'directory' ? (expanded.has(node.path) || query ? '▾' : '▸') : '';
   const icon = document.createElement('span'); icon.className = `tree-icon${node.kind === 'directory' ? ' folder-icon' : ''}`;
-  icon.textContent = node.kind === 'directory' ? '' : node.ext === 'canvas' ? '◇' : node.ext === 'md' ? '▤' : '·';
+  icon.textContent = node.kind === 'directory' ? '' : node.ext === 'canvas' ? '◇' : node.ext === 'timeline' ? '⌁' : node.ext === 'md' ? '▤' : '·';
   const label = document.createElement(isRenaming ? 'input' : 'span');
   label.className = isRenaming ? 'tree-rename-input' : 'tree-label';
   const editableName = node.kind === 'file' && node.ext ? node.name.slice(0, -(node.ext.length + 1)) : node.name;
@@ -543,7 +621,7 @@ function appendTreeNode(node, parent, depth, query) {
       else if (event.key === 'Escape') { event.preventDefault(); finish(false); }
     };
     label.onblur = () => finish(true);
-  } else label.textContent = node.name.replace(/\.(md|canvas)$/i, '');
+  } else label.textContent = node.name.replace(/\.(md|canvas|timeline)$/i, '');
   row.append(toggle, icon, label);
   row.onclick = async event => {
     event.stopPropagation(); selectedPath = node.path;
@@ -593,7 +671,8 @@ function showNodeMenu(node, x, y) {
   if (node.kind === 'directory') items.push(
     { label: '在這裡新增筆記', action: () => createNote(node.path) },
     { label: '新增子資料夾', action: () => createFolder(node.path) },
-    { label: '在這裡新增 Canvas', action: () => createCanvas(node.path) }, 'separator'
+    { label: '在這裡新增 Canvas', action: () => createCanvas(node.path) },
+    { label: '在這裡新增時間線', action: () => createTimeline(node.path) }, 'separator'
   );
   else items.push({ label: '開啟', action: () => openPath(node.path) }, 'separator');
   items.push(
@@ -612,26 +691,46 @@ async function createNote(parentPath = selectedFolder()) {
   if (!vault) return openVaultPicker();
   const value = await ask('新增筆記', '未命名筆記', `建立位置：${parentPath || '筆記庫根目錄'}`);
   if (!value) return;
+  beginFileOperation('正在建立筆記…');
   try {
     const node = await vault.createNote(parentPath, value);
-    expanded.add(parentPath); selectedPath = node.path; await rebuildIndex(); renderTree(); await openPath(node.path); $('documentTitle').focus(); $('documentTitle').select();
+    expanded.add(parentPath); selectedPath = node.path; await rebuildIndex(); renderTree(); await openPath(node.path); requestAnimationFrame(() => { $('documentTitle').focus(); $('documentTitle').select(); });
   } catch (error) { toast(error.message, true); }
+  finally { endFileOperation(); }
 }
 
 async function createFolder(parentPath = selectedFolder()) {
   if (!vault) return openVaultPicker();
   const value = await ask('新增資料夾', '新資料夾', `建立位置：${parentPath || '筆記庫根目錄'}`);
   if (!value) return;
+  beginFileOperation('正在建立資料夾…');
   try { const node = await vault.createFolder(parentPath, value); expanded.add(parentPath); expanded.add(node.path); selectedPath = node.path; renderTree(); }
   catch (error) { toast(error.message, true); }
+  finally { endFileOperation(); }
 }
 
 async function createCanvas(parentPath = selectedFolder()) {
   if (!vault) return openVaultPicker();
   const value = await ask('新增 Canvas', '未命名 Canvas', `建立位置：${parentPath || '筆記庫根目錄'}`);
   if (!value) return;
+  beginFileOperation('正在建立 Canvas…');
   try { const node = await vault.createCanvas(parentPath, value); expanded.add(parentPath); selectedPath = node.path; renderTree(); await openPath(node.path); }
   catch (error) { toast(error.message, true); }
+  finally { endFileOperation(); }
+}
+
+async function createTimeline(parentPath = selectedFolder()) {
+  if (!vault) return openVaultPicker();
+  const value = await ask('新增時間線', '未命名時間線', `建立位置：${parentPath || '筆記庫根目錄'}`);
+  if (!value) return;
+  beginFileOperation('正在建立時間線…');
+  try {
+    const initial = `${JSON.stringify(createEmptyTimeline(value), null, 2)}\n`;
+    const node = await vault.createTimeline(parentPath, value, initial);
+    expanded.add(parentPath); selectedPath = node.path; renderTree(); await openPath(node.path);
+    requestAnimationFrame(() => { $('timelineTitle').focus(); $('timelineTitle').select(); });
+  } catch (error) { toast(error.message, true); }
+  finally { endFileOperation(); }
 }
 
 function beginInlineRename(path) {
@@ -657,21 +756,47 @@ async function renamePath(path, explicitName = null) {
   const value = String(explicitName).trim();
   if (!value || safeName(value, extension) === node.name) return null;
   const oldStem = noteStem(node.name), newName = safeName(value, extension), newStem = noteStem(newName);
+  let operationStarted = false;
+  beginFileOperation(`正在重新命名「${node.name}」…`);
+  operationStarted = true;
   try {
+    if (node.kind === 'file' && node.ext === 'md' && settings.updateLinks) {
+      await saveAllPanes();
+      if (dirty || [...secondaryPanes.values()].some(pane => pane.dirty)) {
+        toast('仍有內容尚未儲存；請先處理衝突，再重新命名', true);
+        return null;
+      }
+    }
+    if ((node.kind === 'directory' || node.ext === 'md') && dirty && currentType === 'timeline') { await saveCurrent(); if (dirty) return null; }
     if (!await flushDirtyWithin(path)) return null;
     const target = await vault.rename(path, newName);
-    if (node.kind === 'file' && node.ext === 'md' && settings.updateLinks) await updateLinksAfterRename(oldStem, newStem);
+    const linkUpdate = node.kind === 'file' && node.ext === 'md' && settings.updateLinks
+      ? await updateLinksAfterRename(oldStem, newStem, path, target)
+      : { skipped: 0 };
     tabs = tabs.map(tab => tab === path ? target : tab.startsWith(`${path}/`) ? `${target}${tab.slice(path.length)}` : tab);
     remapSecondaryPath(path, target);
     remapFileClipboardPath(path, target);
     remapExpandedPaths(path, target);
     if (currentPath === path || currentPath.startsWith(`${path}/`)) currentPath = `${target}${currentPath.slice(path.length)}`;
     selectedPath = target;
+    if (node.kind === 'directory' || node.ext === 'md') await updateTimelineReferences(path, target);
     await rebuildIndex(); renderTree(); renderTabs();
-    if (currentPath === target) { $('documentTitle').value = noteStem(target); $('breadcrumbs').textContent = target; loadedModified = vault.node(target)?.lastModified; }
-    toast(`已重新命名為「${basename(target)}」`);
+    if (currentType === 'md') { renderPreview(); renderRightPanel(); }
+    for (const pane of secondaryPanes.values()) pane.render();
+    if (currentPath) {
+      if (currentType === 'md') $('documentTitle').value = noteStem(currentPath);
+      else if (currentType === 'canvas') $('canvasTitle').textContent = basename(currentPath).replace(/\.canvas$/i, '');
+      else if (currentType === 'timeline') $('timelineTitle').value = basename(currentPath).replace(/\.timeline$/i, '');
+      $('breadcrumbs').textContent = currentPath; loadedModified = vault.node(currentPath)?.lastModified;
+      if (currentType === 'timeline') timelineView.setDocumentIdentity(`${vault.name}:${currentPath}`, basename(currentPath).replace(/\.timeline$/i, ''));
+    }
+    persistVaultState();
+    toast(linkUpdate.skipped
+      ? `已重新命名為「${basename(target)}」；${linkUpdate.skipped} 份外部變更的筆記未更新連結`
+      : `已重新命名為「${basename(target)}」`, Boolean(linkUpdate.skipped));
     return target;
   } catch (error) { toast(error.message, true); return null; }
+  finally { if (operationStarted) endFileOperation(); }
 }
 
 function setFileClipboard(mode, path) {
@@ -737,12 +862,77 @@ async function pasteFileClipboard(destination = selectedFolder()) {
   } catch (error) { toast(error.message, true); }
 }
 
-async function updateLinksAfterRename(oldStem, newStem) {
+async function updateLinksAfterRename(oldStem, newStem, renamedFrom, renamedTo) {
+  let skipped = 0;
   for (const node of vault.markdownNodes()) {
-    const content = await vault.readText(node.path);
-    const replaced = replaceWikiTarget(content, oldStem, newStem);
-    if (replaced !== content) await vault.writeText(node.path, replaced);
+    try {
+      const content = await vault.readText(node.path, true);
+      const expectedModified = node.lastModified;
+      const replaced = replaceWikiTarget(content, oldStem, newStem);
+      if (replaced === content) continue;
+      const modified = await vault.writeText(node.path, replaced, expectedModified);
+      const openPath = node.path === renamedTo ? renamedFrom : node.path;
+      if (currentType === 'md' && currentPath === openPath && !dirty) {
+        $('editor').value = replaced;
+        liveEditor.setValue(replaced);
+        loadedModified = modified;
+      }
+      for (const pane of secondaryPanes.values()) {
+        if (pane.path !== openPath || pane.dirty) continue;
+        pane.editor.value = replaced;
+        pane.live.setValue(replaced);
+        pane.modified = modified;
+        pane.state.textContent = '已同步';
+      }
+    } catch (error) {
+      skipped += 1;
+      console.warn('Markdown 連結更新失敗', node.path, error);
+    }
   }
+  return { skipped };
+}
+
+function remapReferencePath(value, source, target) {
+  if (value === source) return target;
+  return value.startsWith(`${source}/`) ? `${target}${value.slice(source.length)}` : value;
+}
+
+async function updateTimelineReferences(source, target) {
+  let changedCurrent = false;
+  let skipped = 0;
+  for (const node of vault.timelineNodes()) {
+    try {
+      const text = await vault.readText(node.path, true);
+      const data = JSON.parse(text);
+      const version = Number(data?.version ?? 1);
+      if (data?.format !== 'mysyncnote-timeline' || !Number.isFinite(version) || version > 1) throw new Error('格式未知或版本較新，為避免破壞已跳過');
+      let changed = false;
+      for (const event of Array.isArray(data.events) ? data.events : []) {
+        if (Array.isArray(event.notePaths)) {
+          const remapped = event.notePaths.map(path => typeof path === 'string' ? remapReferencePath(path, source, target) : path);
+          if (JSON.stringify(remapped) !== JSON.stringify(event.notePaths)) { event.notePaths = remapped; changed = true; }
+        }
+        if (typeof event.notePath === 'string') {
+          const remapped = remapReferencePath(event.notePath, source, target);
+          if (remapped !== event.notePath) { event.notePath = remapped; changed = true; }
+        }
+      }
+      if (!changed) continue;
+      const content = `${JSON.stringify(data, null, 2)}\n`;
+      const modified = await vault.writeText(node.path, content, node.lastModified);
+      if (node.path === currentPath && currentType === 'timeline') {
+        timelineView.load(content, { key: `${vault.name}:${currentPath}`, title: basename(currentPath).replace(/\.timeline$/i, '') });
+        timelineView.setNotes(index?.entries || []);
+        loadedModified = modified;
+        changedCurrent = true;
+      }
+    } catch (error) {
+      skipped += 1;
+      console.warn('Timeline 筆記連結更新失敗', node.path, error);
+    }
+  }
+  if (changedCurrent) setTimelineReady(true);
+  if (skipped) toast(`${skipped} 份 Timeline 無法更新筆記路徑，原檔未被覆蓋`, true);
 }
 
 async function chooseMoveDestination(path) {
@@ -753,7 +943,13 @@ async function chooseMoveDestination(path) {
 }
 
 async function movePath(path, destination) {
+  let operationStarted = false;
+  const sourceName = vault.node(path)?.name || basename(path);
+  beginFileOperation(`正在移動「${sourceName}」…`);
+  operationStarted = true;
   try {
+    const sourceNode = vault.node(path);
+    if ((sourceNode?.kind === 'directory' || sourceNode?.ext === 'md') && dirty && currentType === 'timeline') { await saveCurrent(); if (dirty) return null; }
     if (!await flushDirtyWithin(path)) return null;
     const target = await vault.move(path, destination);
     tabs = tabs.map(tab => tab === path ? target : tab.startsWith(`${path}/`) ? `${target}${tab.slice(path.length)}` : tab);
@@ -761,21 +957,64 @@ async function movePath(path, destination) {
     remapFileClipboardPath(path, target);
     remapExpandedPaths(path, target);
     if (currentPath === path || currentPath.startsWith(`${path}/`)) currentPath = `${target}${currentPath.slice(path.length)}`;
-    selectedPath = target; expanded.add(destination); await rebuildIndex(); renderTree(); renderTabs(); toast(`已移動到「${destination || vault.name}」`);
+    if (sourceNode?.kind === 'directory' || sourceNode?.ext === 'md') await updateTimelineReferences(path, target);
+    selectedPath = target; expanded.add(destination); await rebuildIndex(); renderTree(); renderTabs();
+    if (currentPath) {
+      loadedModified = vault.node(currentPath)?.lastModified;
+      $('breadcrumbs').textContent = currentPath;
+      if (currentType === 'md') $('documentTitle').value = noteStem(currentPath);
+      else if (currentType === 'canvas') $('canvasTitle').textContent = basename(currentPath).replace(/\.canvas$/i, '');
+      else if (currentType === 'timeline') {
+        $('timelineTitle').value = basename(currentPath).replace(/\.timeline$/i, '');
+        timelineView.setDocumentIdentity(`${vault.name}:${currentPath}`, basename(currentPath).replace(/\.timeline$/i, ''));
+      }
+    }
+    persistVaultState();
+    toast(`已移動到「${destination || vault.name}」`);
     return target;
   } catch (error) { toast(error.message, true); return null; }
+  finally { if (operationStarted) endFileOperation(); }
 }
 
 async function deletePath(path) {
   const node = vault?.node(path); if (!node) return;
   if (!await confirmAction(`刪除「${node.name}」？`, settings.trashMode === 'trash' ? '項目會移到筆記庫的 .trash 資料夾。' : '這會直接永久刪除，無法復原。', '刪除')) return;
+  let operationStarted = false;
+  beginFileOperation(`正在刪除「${node.name}」…`);
+  operationStarted = true;
   try {
     const deletingCurrent = currentPath === path || currentPath.startsWith(`${path}/`);
+    const affectedPanes = [...secondaryPanes.values()].filter(pane => pane.path === path || pane.path.startsWith(`${path}/`));
+    if (deletingCurrent) {
+      clearTimeout(autoSaveTimer);
+      await saveChain.catch(() => {});
+    }
+    for (const pane of affectedPanes) clearTimeout(pane.timer);
+    await Promise.all(affectedPanes.map(pane => pane.savePromise).filter(Boolean));
     await vault.remove(path, settings.trashMode === 'trash');
+    if (deletingCurrent) saveGeneration += 1;
+    if (deletingCurrent) {
+      clearTimeout(autoSaveTimer);
+      currentPath = '';
+      currentType = '';
+      loadedModified = null;
+      dirty = false;
+      editRevision = 0;
+      currentCanvasValid = true;
+      currentTimelineValid = true;
+    }
     if (fileClipboard && pathContains(path, fileClipboard.path)) fileClipboard = null;
     for (const pane of [...secondaryPanes.values()]) {
       const removedActive = pane.path === path || pane.path.startsWith(`${path}/`);
       pane.tabs = pane.tabs.filter(tabPath => tabPath !== path && !tabPath.startsWith(`${path}/`));
+      if (removedActive) {
+        pane.openGeneration += 1;
+        clearTimeout(pane.timer);
+        pane.path = '';
+        pane.modified = null;
+        pane.dirty = false;
+        pane.revision = 0;
+      }
       if (!pane.tabs.length) await closeSecondaryPane(pane, false);
       else if (removedActive) await openPathInSecondaryPane(pane, pane.tabs[0], false);
       else renderSecondaryTabs(pane);
@@ -784,10 +1023,11 @@ async function deletePath(path) {
     if (deletingCurrent) {
       const next = tabs[0];
       if (next) await openPath(next, false, true);
-      else { currentPath = ''; currentType = ''; loadedModified = null; dirty = false; editRevision = 0; $('breadcrumbs').textContent = vault.name; showView('welcome'); }
+      else { $('breadcrumbs').textContent = vault.name; showView('welcome'); }
     }
     selectedPath = ''; await rebuildIndex(); renderTree(); renderTabs(); toast('已刪除');
   } catch (error) { toast(error.message, true); }
+  finally { if (operationStarted) endFileOperation(); }
 }
 
 function canvasViewStateKey(path) { return vault ? `mysyncnote-canvas-view:${vault.name}:${path}` : ''; }
@@ -806,32 +1046,94 @@ function setCanvasReady(ready, message = '') {
   for (const id of ['canvasAddText', 'canvasAddNote', 'canvasAddLink', 'canvasAddGroup', 'canvasUndo', 'canvasRedo', 'canvasZoomOut', 'canvasZoomReset', 'canvasZoomIn', 'canvasFit']) $(id).disabled = !ready;
 }
 
+function setTimelineReady(ready, message = '') {
+  currentTimelineValid = ready;
+  $('timelineError').classList.toggle('hidden', ready);
+  $('timelineError').textContent = ready ? '' : `${message}\n\n為了避免覆蓋原檔案，這份 Timeline 已停用編輯與自動儲存。`;
+  $('timelineWorkspace').querySelectorAll('button, input, select, textarea').forEach(control => {
+    if (control.id !== 'closeTimeline') control.disabled = !ready;
+  });
+  if (ready) timelineView.activate();
+}
+
+function currentDocumentReady() {
+  if (currentType === 'canvas') return currentCanvasValid;
+  if (currentType === 'timeline') return currentTimelineValid;
+  return true;
+}
+
 async function openPath(path, addHistory = true, forcePrimary = false) {
   if (!vault) return;
   const node = vault.node(path); if (!node || node.kind !== 'file') return;
   const activePane = !forcePrimary ? activeSecondaryPane() : null;
   if (activePane && node.ext === 'md') return openPathInSecondaryPane(activePane, path);
+  const token = ++openGeneration;
   const primarySlot = document.querySelector('.pane-slot[data-pane-key="primary"]');
   if (primarySlot) setActivePaneSlot(primarySlot);
-  if (dirty && currentPath !== path) { await saveCurrent(); if (dirty) return; }
-  selectedPath = path; currentPath = path; currentType = node.ext; loadedModified = node.lastModified; dirty = false; editRevision = 0; currentCanvasValid = true;
-  if (!tabs.includes(path)) tabs.push(path);
-  persistVaultState();
-  if (addHistory && history[historyIndex] !== path) { history = history.slice(0, historyIndex + 1); history.push(path); historyIndex = history.length - 1; }
-  if (node.ext === 'md') {
+  setPrimaryLoading(true);
+  try {
+    if (dirty) {
+      await saveCurrent();
+      if (token !== openGeneration || dirty) return;
+    }
+    if (!['md', 'canvas', 'timeline'].includes(node.ext)) {
+      const blob = await vault.readBlob(path);
+      if (token === openGeneration) window.open(URL.createObjectURL(blob), '_blank');
+      return;
+    }
     const content = await vault.readText(path, true);
-    $('editor').value = content; liveEditor.setValue(content); $('wikiSuggest').classList.add('hidden'); $('documentTitle').value = noteStem(path); showView('note'); applyViewMode(); renderPreview(); renderRightPanel();
-  } else if (node.ext === 'canvas') {
-    const content = await vault.readText(path, true); $('canvasTitle').textContent = basename(path).replace(/\.canvas$/i, ''); showView('canvas');
-    try {
-      canvasView.load(content, { key: path, view: readCanvasViewState(path) }); setCanvasReady(true);
-      $('canvasZoomLabel').textContent = `${Math.round(canvasView.viewState().scale * 100)}%`;
-      requestAnimationFrame(() => canvasView.activate());
-    } catch (error) { setCanvasReady(false, error.message); toast(error.message, true); }
-  } else {
-    const blob = await vault.readBlob(path); window.open(URL.createObjectURL(blob), '_blank');
+    if (token !== openGeneration) return;
+    const latestNode = vault.node(path);
+    if (!latestNode || latestNode.kind !== 'file') return;
+
+    selectedPath = path;
+    currentPath = path;
+    currentType = latestNode.ext;
+    loadedModified = latestNode.lastModified ?? null;
+    dirty = false;
+    editRevision = 0;
+    currentCanvasValid = true;
+    currentTimelineValid = true;
+    if (!tabs.includes(path)) tabs.push(path);
+    persistVaultState();
+    if (addHistory && history[historyIndex] !== path) { history = history.slice(0, historyIndex + 1); history.push(path); historyIndex = history.length - 1; }
+
+    if (latestNode.ext === 'md') {
+      $('editor').value = content; liveEditor.setValue(content); $('wikiSuggest').classList.add('hidden'); $('documentTitle').value = noteStem(path); showView('note'); applyViewMode(); renderPreview(); renderRightPanel();
+    } else if (latestNode.ext === 'canvas') {
+      $('canvasTitle').textContent = basename(path).replace(/\.canvas$/i, ''); showView('canvas');
+      try {
+        canvasView.load(content, { key: path, view: readCanvasViewState(path) }); setCanvasReady(true);
+        $('canvasZoomLabel').textContent = `${Math.round(canvasView.viewState().scale * 100)}%`;
+        requestAnimationFrame(() => canvasView.activate());
+      } catch (error) { setCanvasReady(false, error.message); toast(error.message, true); }
+    } else {
+      $('timelineTitle').value = basename(path).replace(/\.timeline$/i, '');
+      app.classList.add('right-collapsed');
+      app.classList.remove('right-open');
+      showView('timeline');
+      try {
+        timelineView.load(content, { key: `${vault.name}:${path}`, title: basename(path).replace(/\.timeline$/i, '') });
+        timelineView.setNotes(index?.entries || []);
+        setTimelineReady(true);
+        requestAnimationFrame(() => { timelineView.activate(); $('timelineWorkspace').focus({ preventScroll: true }); });
+      } catch (error) {
+        setTimelineReady(false, error.message);
+        toast(error.message, true);
+      }
+      renderRightPanel();
+    }
+    $('breadcrumbs').textContent = path;
+    setSaveState(currentDocumentReady() ? '已儲存' : '無法編輯', !currentDocumentReady());
+    renderTree();
+    renderTabs();
+    updateHistoryButtons();
+    hideMobilePanels();
+  } catch (error) {
+    if (token === openGeneration) toast(`無法開啟「${path}」：${error.message}`, true);
+  } finally {
+    if (token === openGeneration) setPrimaryLoading(false);
   }
-  $('breadcrumbs').textContent = path; setSaveState(currentCanvasValid ? '已儲存' : '無法編輯', !currentCanvasValid); renderTree(); renderTabs(); updateHistoryButtons(); hideMobilePanels();
 }
 
 function renderTabs() {
@@ -840,17 +1142,22 @@ function renderTabs() {
   for (const path of tabs) {
     if (!vault?.node(path)) continue;
     const tab = document.createElement('button'); tab.className = `tab${path === currentPath ? ' active' : ''}`; tab.role = 'tab';
-    const icon = vault.node(path)?.ext === 'canvas' ? '◇' : '▤';
+    const extension = vault.node(path)?.ext;
+    const icon = extension === 'canvas' ? '◇' : extension === 'timeline' ? '⌁' : '▤';
     tab.draggable = true;
     tab.innerHTML = `<span>${icon}</span><span class="tab-label"></span><span class="tab-close">×</span>`;
-    tab.querySelector('.tab-label').textContent = basename(path).replace(/\.(md|canvas)$/i, '');
+    tab.querySelector('.tab-label').textContent = basename(path).replace(/\.(md|canvas|timeline)$/i, '');
     tab.onclick = event => { setActivePaneSlot(primarySlot); if (event.target.closest('.tab-close')) closeTab(path); else openPath(path, true, true); };
-    tab.oncontextmenu = event => { event.preventDefault(); showMenu([
-      { label: '向右分割', action: () => addSecondaryPane(path, 'right', primarySlot) },
-      { label: '向下分割', action: () => addSecondaryPane(path, 'bottom', primarySlot) },
-      { label: '向左分割', action: () => addSecondaryPane(path, 'left', primarySlot) },
-      { label: '向上分割', action: () => addSecondaryPane(path, 'top', primarySlot) }
-    ], event.clientX, event.clientY); };
+    tab.oncontextmenu = event => {
+      if (extension !== 'md') return;
+      event.preventDefault();
+      showMenu([
+        { label: '向右分割', action: () => addSecondaryPane(path, 'right', primarySlot) },
+        { label: '向下分割', action: () => addSecondaryPane(path, 'bottom', primarySlot) },
+        { label: '向左分割', action: () => addSecondaryPane(path, 'left', primarySlot) },
+        { label: '向上分割', action: () => addSecondaryPane(path, 'top', primarySlot) }
+      ], event.clientX, event.clientY);
+    };
     tab.ondragstart = event => { event.dataTransfer.setData('text/mysyncnote-tab', JSON.stringify({ source: 'primary', path })); event.dataTransfer.effectAllowed = 'copyMove'; };
     tab.ondragover = event => { if ([...event.dataTransfer.types].includes('text/mysyncnote-tab')) event.preventDefault(); };
     tab.ondrop = async event => {
@@ -894,6 +1201,7 @@ async function placeDraggedTab(info, targetSlot, direction) {
     if (sourcePane && sourcePane !== targetPane) await closeSecondaryTab(sourcePane, info.path);
     return;
   }
+  if (vault.node(info.path)?.ext !== 'md') return toast('目前只有 Markdown 筆記可以加入分割群組；時間線仍保留在主要分頁', true);
   const created = await addSecondaryPane(info.path, direction, targetSlot);
   if (created && sourcePane && sourcePane !== created) await closeSecondaryTab(sourcePane, info.path);
 }
@@ -928,7 +1236,7 @@ async function addSecondaryPane(path, direction = 'right', targetSlot = activePa
   const node = vault.node(path);
   const savedTabs = [...new Set((options.tabs || [path]).filter(item => vault.node(item)?.ext === 'md'))];
   if (!savedTabs.includes(path)) savedTabs.push(path);
-  const pane = { id: String(options.id || newGroupId()), path, tabs: savedTabs, modified: node.lastModified, dirty: false, revision: 0, timer: null, mode: options.mode || 'live', objectUrls: [] };
+  const pane = { id: String(options.id || newGroupId()), path, tabs: savedTabs, modified: node.lastModified, dirty: false, revision: 0, timer: null, mode: options.mode || 'live', objectUrls: [], openGeneration: 0, savePromise: null };
   const element = document.createElement('section');
   element.className = 'dock-pane secondary-note-pane editor-group'; element.dataset.groupId = pane.id;
   element.innerHTML = `<div class="tabs group-tabs secondary-group-tabs" role="tablist"></div><header class="document-header secondary-pane-document-header"><div class="document-title-row secondary-pane-drag" draggable="true"><span class="tree-icon">▤</span><span class="secondary-pane-title"></span><span class="secondary-pane-state">已儲存</span><button class="pane-primary icon-btn" title="移到主要群組">↗</button><button class="pane-close icon-btn" title="關閉目前分頁">×</button></div><div class="editor-toolbar secondary-editor-toolbar"><button data-pane-history="undo" title="復原（Ctrl+Z）" aria-label="復原">↶</button><button data-pane-history="redo" title="重做（Ctrl+Y）" aria-label="重做">↷</button><span class="tool-separator"></span><button data-pane-format="heading" title="標題">H</button><button data-pane-format="bold" title="粗體"><b>B</b></button><button data-pane-format="italic" title="斜體"><i>I</i></button><button data-pane-format="strike" title="刪除線"><s>S</s></button><button data-pane-format="highlight" title="醒目標記">螢</button><span class="tool-separator"></span><button data-pane-format="link" title="連結">鏈</button><button data-pane-format="wikilink" title="Wiki 連結">[[]]</button><button data-pane-format="code" title="程式碼">&lt;/&gt;</button><button data-pane-format="quote" title="引用">❝</button><button data-pane-format="list" title="清單">☷</button><button data-pane-format="task" title="待辦事項">☑</button><span class="tool-spacer"></span><div class="view-switch pane-view-switch"><button data-pane-view="live" class="active">混合</button><button data-pane-view="edit">原始碼</button><button data-pane-view="split">並排</button><button data-pane-view="read">閱讀</button></div></div></header><div class="secondary-pane-body live"><textarea class="secondary-pane-editor" spellcheck="true"></textarea><div class="secondary-pane-live live-editor"></div><article class="secondary-pane-preview markdown-body"></article><div class="secondary-wiki-suggest suggestions hidden"></div></div>`;
@@ -942,20 +1250,49 @@ async function addSecondaryPane(path, direction = 'right', targetSlot = activePa
     pane.preview.querySelectorAll('[data-tag]').forEach(tag => tag.onclick = () => searchTag(tag.dataset.tag));
     pane.preview.querySelectorAll('[data-vault-image]').forEach(async image => { const asset = resolveAsset(image.dataset.vaultImage, pane.path); if (!asset) return; const url = URL.createObjectURL(await vault.readBlob(asset.path)); pane.objectUrls.push(url); image.src = url; });
   };
-  pane.save = async () => {
-    if (!pane.dirty) return;
-    clearTimeout(pane.timer); pane.state.textContent = '正在儲存…'; const revision = pane.revision, text = pane.editor.value;
-    try {
-      pane.modified = await vault.writeText(pane.path, text, pane.modified);
-      pane.dirty = pane.revision !== revision; pane.state.textContent = pane.dirty ? '尚未儲存' : '已儲存'; scheduleIndex();
-      if (pane.path === currentPath && !dirty) { $('editor').value = text; liveEditor.setValue(text); loadedModified = pane.modified; renderPreview(); }
-      for (const mirror of secondaryPanes.values()) if (mirror !== pane && mirror.path === pane.path && !mirror.dirty) { mirror.editor.value = text; mirror.live.setValue(text); mirror.modified = pane.modified; mirror.state.textContent = '已同步'; mirror.render(); }
-    } catch (error) {
-      pane.state.textContent = '外部版本衝突';
-      if (error.name === 'ExternalChangeError' && await confirmAction('這個窗格偵測到外部修改', `「${pane.path}」已被 FolderSync 或另一個窗格修改。要用這個窗格的內容覆蓋嗎？`, '保留這個窗格', true)) {
-        pane.modified = await vault.writeText(pane.path, text, null); pane.dirty = pane.revision !== revision; pane.state.textContent = pane.dirty ? '尚未儲存' : '已儲存'; scheduleIndex();
-      } else toast(`「${pane.path}」尚未儲存`, true);
-    }
+  pane.save = () => {
+    if (!pane.dirty) return pane.savePromise || Promise.resolve();
+    clearTimeout(pane.timer);
+    const revision = pane.revision, text = pane.editor.value, pathAtStart = pane.path;
+    const previous = pane.savePromise || Promise.resolve();
+    const job = previous.catch(() => {}).then(async () => {
+      if (pane.path !== pathAtStart && !vault.node(pathAtStart)) return;
+      pane.state.textContent = '正在儲存…';
+      try {
+        const expected = pane.path === pathAtStart ? pane.modified : vault.node(pathAtStart)?.lastModified;
+        const modified = await vault.writeText(pathAtStart, text, expected);
+        if (pane.path === pathAtStart) {
+          pane.modified = modified;
+          pane.dirty = pane.revision !== revision;
+          pane.state.textContent = pane.dirty ? '尚未儲存' : '已儲存';
+        }
+        scheduleIndex();
+        if (pathAtStart === currentPath && !dirty) { $('editor').value = text; liveEditor.setValue(text); loadedModified = modified; renderPreview(); }
+        for (const mirror of secondaryPanes.values()) if (mirror !== pane && mirror.path === pathAtStart && !mirror.dirty) { mirror.editor.value = text; mirror.live.setValue(text); mirror.modified = modified; mirror.state.textContent = '已同步'; mirror.render(); }
+      } catch (error) {
+        try {
+          pane.state.textContent = '外部版本衝突';
+          if (error.name === 'ExternalChangeError' && await confirmAction('這個窗格偵測到外部修改', `「${pathAtStart}」已被 FolderSync 或另一個窗格修改。要用這個窗格的內容覆蓋嗎？`, '保留這個窗格', true)) {
+            const modified = await vault.writeText(pathAtStart, text, null);
+            if (pane.path === pathAtStart) {
+              pane.modified = modified;
+              pane.dirty = pane.revision !== revision;
+              pane.state.textContent = pane.dirty ? '尚未儲存' : '已儲存';
+            }
+            scheduleIndex();
+          } else toast(`「${pathAtStart}」尚未儲存`, true);
+        } catch (saveError) {
+          if (pane.path === pathAtStart) {
+            pane.dirty = true;
+            pane.state.textContent = '儲存失敗';
+          }
+          toast(saveError.message || `「${pathAtStart}」尚未儲存`, true);
+        }
+      }
+    });
+    const tracked = job.finally(() => { if (pane.savePromise === tracked) pane.savePromise = null; });
+    pane.savePromise = tracked;
+    return tracked;
   };
   pane.markDirty = () => { pane.revision += 1; pane.dirty = true; pane.state.textContent = '尚未儲存'; if (pane.mode === 'split' || pane.mode === 'read') pane.render(); clearTimeout(pane.timer); if (settings.autoSave) pane.timer = setTimeout(pane.save, 800); };
   pane.live = new LiveMarkdownEditor(element.querySelector('.secondary-pane-live'), {
@@ -979,19 +1316,41 @@ async function addSecondaryPane(path, direction = 'right', targetSlot = activePa
   secondaryPanes.set(pane.id, pane);
   insertPane(element, `group:${pane.id}`, direction, targetSlot);
   await openPathInSecondaryPane(pane, path, false); pane.setMode(pane.mode); persistSecondaryOrder();
-  showView(currentView === 'welcome' ? (currentPath ? (currentType === 'canvas' ? 'canvas' : 'note') : 'welcome') : currentView);
+  showView(currentView === 'welcome' ? primaryViewForType() : currentView);
   return pane;
 }
 
 async function openPathInSecondaryPane(pane, path, addTab = true) {
   const node = vault?.node(path); if (!pane || !node || node.ext !== 'md') return;
-  if (pane.dirty && pane.path !== path) { await pane.save(); if (pane.dirty) return; }
-  if (addTab && !pane.tabs.includes(path)) pane.tabs.push(path);
-  const content = await vault.readText(path, true);
-  pane.path = path; pane.modified = node.lastModified; pane.dirty = false; pane.revision = 0; pane.editor.value = content; pane.live.setValue(content); pane.state.textContent = '已儲存'; pane.suggest.classList.add('hidden');
-  pane.element.querySelector('.secondary-pane-title').textContent = noteStem(path);
-  selectedPath = path; for (let parent = dirname(path); parent; parent = dirname(parent)) expanded.add(parent);
-  setActivePaneSlot(pane.element.closest('.pane-slot')); pane.render(); renderSecondaryTabs(pane); renderTree(); persistSecondaryOrder();
+  const token = ++pane.openGeneration;
+  pane.element.inert = true;
+  pane.element.classList.add('loading');
+  pane.state.textContent = '讀取中…';
+  try {
+    if (pane.dirty) {
+      await pane.save();
+      if (token !== pane.openGeneration || pane.dirty) return;
+    }
+    const content = await vault.readText(path, true);
+    if (token !== pane.openGeneration) return;
+    const latestNode = vault.node(path);
+    if (!latestNode || latestNode.ext !== 'md') return;
+    if (addTab && !pane.tabs.includes(path)) pane.tabs.push(path);
+    pane.path = path; pane.modified = latestNode.lastModified; pane.dirty = false; pane.revision = 0; pane.editor.value = content; pane.live.setValue(content); pane.state.textContent = '已儲存'; pane.suggest.classList.add('hidden');
+    pane.element.querySelector('.secondary-pane-title').textContent = noteStem(path);
+    selectedPath = path; for (let parent = dirname(path); parent; parent = dirname(parent)) expanded.add(parent);
+    setActivePaneSlot(pane.element.closest('.pane-slot')); pane.render(); renderSecondaryTabs(pane); renderTree(); persistSecondaryOrder();
+  } catch (error) {
+    if (token === pane.openGeneration) {
+      pane.state.textContent = '讀取失敗';
+      toast(`無法開啟「${path}」：${error.message}`, true);
+    }
+  } finally {
+    if (token === pane.openGeneration) {
+      pane.element.inert = false;
+      pane.element.classList.remove('loading');
+    }
+  }
 }
 
 async function closeSecondaryTab(pane, path, save = true) {
@@ -1007,6 +1366,7 @@ async function closeSecondaryPane(paneOrId, save = true) {
   const pane = typeof paneOrId === 'string' ? secondaryPanes.get(paneOrId) : paneOrId; if (!pane) return;
   if (save && pane.dirty) { await pane.save(); if (pane.dirty) return; }
   const slot = pane.element.closest('.pane-slot');
+  pane.openGeneration += 1;
   clearTimeout(pane.timer); pane.objectUrls.forEach(URL.revokeObjectURL); pane.element.remove(); secondaryPanes.delete(pane.id); if (slot) detachPaneSlot(slot, false); persistSecondaryOrder();
   if (!currentPath && !graphDocked && !secondaryPanes.size) showView('welcome');
 }
@@ -1048,7 +1408,7 @@ async function closeTab(path) {
       const pane = secondaryPanes.values().next().value, promotePath = pane.path, promoteTabs = [...pane.tabs];
       if (pane.dirty) await pane.save(); await closeSecondaryPane(pane, false); tabs = promoteTabs; await openPath(promotePath, false, true);
     } else {
-      currentPath = ''; currentType = ''; loadedModified = null; dirty = false; editRevision = 0; currentCanvasValid = true;
+      currentPath = ''; currentType = ''; loadedModified = null; dirty = false; editRevision = 0; currentCanvasValid = true; currentTimelineValid = true;
       $('breadcrumbs').textContent = vault?.name || '尚未開啟筆記庫'; renderRightPanel(); showView('welcome');
     }
   }
@@ -1073,11 +1433,13 @@ function scheduleSave() {
 async function saveCurrent(silent = false) {
   if (!vault || !currentPath || !dirty) return;
   if (currentType === 'canvas' && !currentCanvasValid) return toast('Canvas 格式錯誤，為避免覆蓋原檔案，未執行儲存。', true);
+  if (currentType === 'timeline' && !currentTimelineValid) return toast('Timeline 格式錯誤，為避免覆蓋原檔案，未執行儲存。', true);
   clearTimeout(autoSaveTimer);
-  const pathAtStart = currentPath, typeAtStart = currentType, revisionAtStart = editRevision;
-  const text = typeAtStart === 'canvas' ? canvasView.json() : $('editor').value;
+  const pathAtStart = currentPath, typeAtStart = currentType, revisionAtStart = editRevision, generationAtStart = saveGeneration;
+  const text = typeAtStart === 'canvas' ? canvasView.json() : typeAtStart === 'timeline' ? timelineView.json() : $('editor').value;
   setSaveState('正在儲存…');
-  saveChain = saveChain.then(async () => {
+  saveChain = saveChain.catch(() => {}).then(async () => {
+    if (generationAtStart !== saveGeneration) return;
     try {
       const expected = currentPath === pathAtStart ? loadedModified : vault.node(pathAtStart)?.lastModified;
       const modified = await vault.writeText(pathAtStart, text, expected);
@@ -1087,41 +1449,126 @@ async function saveCurrent(silent = false) {
       }
       const mirrors = typeAtStart === 'md' ? [...secondaryPanes.values()].filter(pane => pane.path === pathAtStart && !pane.dirty) : [];
       for (const mirror of mirrors) { mirror.editor.value = text; mirror.live.setValue(text); mirror.modified = modified; mirror.state.textContent = '已同步'; }
-      scheduleIndex();
+      if (typeAtStart === 'md') scheduleIndex();
       if (!silent) toast('已儲存');
     } catch (error) {
-      if (error.name === 'ExternalChangeError') await resolveConflict(pathAtStart, text, error);
-      else { setSaveState('儲存失敗', true); toast(error.message, true); }
+      try {
+        if (error.name === 'ExternalChangeError') await resolveConflict(pathAtStart, text, error, revisionAtStart);
+        else throw error;
+      } catch (saveError) {
+        if (currentPath === pathAtStart) {
+          dirty = true;
+          setSaveState('儲存失敗', true);
+        }
+        toast(saveError.message || '儲存失敗，內容仍保留在畫面中', true);
+      }
     }
   });
   return saveChain;
 }
 
-async function resolveConflict(path, localText, error) {
+async function resolveConflict(path, localText, error, revisionAtStart = editRevision) {
   const type = vault.node(path)?.ext || currentType;
   $('confirmTitle').textContent = '偵測到外部修改';
-  $('confirmMessage').textContent = 'FolderSync 或其他程式已經修改這份筆記。請選擇要保留哪個版本。';
+  $('confirmMessage').textContent = error.externalDeleted
+    ? 'FolderSync 或其他程式已經刪除這份筆記。你可以用目前內容重新建立，或接受外部刪除。'
+    : 'FolderSync 或其他程式已經修改這份筆記。請選擇要保留哪個版本。';
   $('confirmOk').textContent = '保留目前版本'; $('confirmOk').className = 'danger';
-  $('confirmExtra').innerHTML = '<div class="dialog-actions" style="justify-content:flex-start"><button type="button" data-choice="external">載入外部版本</button><button type="button" data-choice="both">兩份都保留</button></div>';
+  $('confirmExtra').innerHTML = error.externalDeleted
+    ? '<div class="dialog-actions" style="justify-content:flex-start"><button type="button" data-choice="external">接受外部刪除</button></div>'
+    : '<div class="dialog-actions" style="justify-content:flex-start"><button type="button" data-choice="external">載入外部版本</button><button type="button" data-choice="both">兩份都保留</button></div>';
   $('confirmDialog').showModal();
   $('confirmExtra').querySelectorAll('button').forEach(button => button.onclick = () => { $('confirmDialog').returnValue = button.dataset.choice; $('confirmDialog').close(); });
   const choice = await new Promise(resolve => $('confirmDialog').addEventListener('close', () => resolve($('confirmDialog').returnValue), { once: true }));
   if (choice === 'default') {
-    loadedModified = await vault.writeText(path, localText, null); dirty = false; setSaveState('已儲存'); toast('已保留目前版本');
+    loadedModified = await vault.writeText(path, localText, null);
+    dirty = editRevision !== revisionAtStart;
+    setSaveState(dirty ? '尚未儲存' : '已儲存');
+    toast('已保留目前版本');
   } else if (choice === 'external') {
+    if (error.externalDeleted) {
+      beginFileOperation('正在套用 FolderSync 的刪除…');
+      try {
+      saveGeneration += 1;
+      clearTimeout(autoSaveTimer);
+      tabs = tabs.filter(tab => tab !== path);
+      currentPath = '';
+      currentType = '';
+      loadedModified = null;
+      dirty = false;
+      editRevision = 0;
+      currentCanvasValid = true;
+      currentTimelineValid = true;
+      vault.contents.delete(path);
+      const affectedPanes = [...secondaryPanes.values()].filter(pane => pane.path === path || pane.tabs.includes(path));
+      for (const pane of affectedPanes) {
+        clearTimeout(pane.timer);
+        pane.tabs = pane.tabs.filter(tab => tab !== path);
+        if (pane.path === path) {
+          pane.openGeneration += 1;
+          pane.path = '';
+          pane.modified = null;
+          pane.dirty = false;
+          pane.revision = 0;
+        }
+      }
+      await vault.scan();
+      await rebuildIndex();
+      for (const pane of affectedPanes) {
+        if (!pane.tabs.length) await closeSecondaryPane(pane, false);
+        else if (!pane.path) await openPathInSecondaryPane(pane, pane.tabs[0], false);
+        else renderSecondaryTabs(pane);
+      }
+      renderTree();
+      renderTabs();
+      const next = tabs.find(tab => vault.node(tab));
+      if (next) await openPath(next, false, true);
+      else {
+        $('breadcrumbs').textContent = vault.name;
+        showView('welcome');
+        setSaveState('已接受外部刪除');
+      }
+      toast('已接受 FolderSync 的刪除');
+      return;
+      } finally {
+        endFileOperation();
+      }
+    }
+    saveGeneration += 1;
+    clearTimeout(autoSaveTimer);
     if (type === 'canvas') {
       try { canvasView.load(error.externalText, { key: path, view: readCanvasViewState(path) }); setCanvasReady(true); }
       catch (loadError) { setCanvasReady(false, loadError.message); }
+    } else if (type === 'timeline') {
+      try { timelineView.load(error.externalText, { key: `${vault.name}:${path}`, title: basename(path).replace(/\.timeline$/i, '') }); timelineView.setNotes(index?.entries || []); setTimelineReady(true); }
+      catch (loadError) { setTimelineReady(false, loadError.message); }
     } else { $('editor').value = error.externalText; liveEditor.setValue(error.externalText); renderPreview(); }
-    vault.contents.set(path, error.externalText); loadedModified = error.externalModified; dirty = false; editRevision = 0; setSaveState(currentCanvasValid ? '已載入外部版本' : '無法編輯', !currentCanvasValid);
+    vault.contents.set(path, error.externalText); loadedModified = error.externalModified; dirty = false; editRevision = 0; setSaveState(currentDocumentReady() ? '已載入外部版本' : '無法編輯', !currentDocumentReady());
   } else if (choice === 'both') {
+    beginFileOperation('正在安全保留兩個版本…');
+    try {
+    const latestLocalText = currentPath === path
+      ? type === 'canvas'
+        ? canvasView.json()
+        : type === 'timeline'
+          ? timelineView.json()
+          : $('editor').value
+      : localText;
     const folder = dirname(path), stem = basename(path).replace(/\.[^.]+$/, ''); const desired = `${stem}（衝突 ${new Date().toLocaleString('zh-TW').replace(/[/:]/g, '-')}）.${type}`;
-    const name = await vault.uniqueName(folder, desired); await vault.writeText(`${folder ? `${folder}/` : ''}${name}`, localText);
+    const name = await vault.uniqueName(folder, desired); await vault.writeText(`${folder ? `${folder}/` : ''}${name}`, latestLocalText);
+    saveGeneration += 1;
+    clearTimeout(autoSaveTimer);
     if (type === 'canvas') {
       try { canvasView.load(error.externalText, { key: path, view: readCanvasViewState(path) }); setCanvasReady(true); }
       catch (loadError) { setCanvasReady(false, loadError.message); }
+    } else if (type === 'timeline') {
+      try { timelineView.load(error.externalText, { key: `${vault.name}:${path}`, title: basename(path).replace(/\.timeline$/i, '') }); timelineView.setNotes(index?.entries || []); setTimelineReady(true); }
+      catch (loadError) { setTimelineReady(false, loadError.message); }
     } else { $('editor').value = error.externalText; liveEditor.setValue(error.externalText); renderPreview(); }
-    vault.contents.set(path, error.externalText); loadedModified = error.externalModified; dirty = false; editRevision = 0; await vault.scan(); await rebuildIndex(); renderTree(); setSaveState(currentCanvasValid ? '已保留兩份' : '無法編輯', !currentCanvasValid); toast(`目前內容另存為「${name}」`);
+    vault.contents.set(path, error.externalText); loadedModified = error.externalModified; dirty = false; editRevision = 0; await vault.scan(); await rebuildIndex(); renderTree(); setSaveState(currentDocumentReady() ? '已保留兩份' : '無法編輯', !currentDocumentReady()); toast(`目前內容另存為「${name}」`);
+    } finally {
+      endFileOperation();
+    }
   } else setSaveState('尚未儲存', true);
 }
 
@@ -1311,7 +1758,7 @@ function closeGraphDock() {
 }
 
 function updateGraph() {
-  graph.setData(index, { scope: $('graphScope').value, currentPath, depth: Number($('graphDepth').value), filter: $('graphFilter').value, isolates: $('graphIsolates').classList.contains('active') });
+  graph.setData(index, { scope: $('graphScope').value, currentPath: currentType === 'md' ? currentPath : '', depth: Number($('graphDepth').value), filter: $('graphFilter').value, isolates: $('graphIsolates').classList.contains('active') });
   $('graphSummary').textContent = `${graph.nodes.length} 篇筆記 · ${graph.edges.length} 條連結`;
 }
 
@@ -1341,33 +1788,67 @@ const canvasView = new CanvasView({
   }
 });
 
+async function openTimelineLinkedNote(path, options = {}) {
+  const node = vault?.node(path);
+  if (!node || node.ext !== 'md') return toast(`找不到連結筆記「${path}」；可能尚未由 FolderSync 同步完成`, true);
+  const primarySlot = document.querySelector('.pane-slot[data-pane-key="primary"]');
+  const availableWidth = primarySlot?.getBoundingClientRect().width || 0;
+  if (options.beside && availableWidth >= 720) {
+    const existing = [...secondaryPanes.values()].find(pane => pane.tabs.includes(path));
+    if (existing) return openPathInSecondaryPane(existing, path, false);
+    return addSecondaryPane(path, 'right', primarySlot || activePaneSlot);
+  }
+  return openPath(path, true, true);
+}
+
+const timelineView = new TimelineView({
+  root: $('timelineWorkspace'),
+  onChange: () => { if (currentType === 'timeline' && currentTimelineValid) scheduleSave(); },
+  onOpenNote: openTimelineLinkedNote,
+  onAcceptNote: path => vault?.node(path)?.ext === 'md',
+  requestText: (title, value, help) => ask(title, value, help),
+  notify: toast
+});
+
 function openCommandPalette() {
   const commands = [
-    { label: '新增筆記', hint: settings.shortcuts.newNote, run: () => createNote() }, { label: '新增資料夾', run: () => createFolder() }, { label: '新增 Canvas', run: () => createCanvas() },
+    { label: '新增筆記', hint: settings.shortcuts.newNote, run: () => createNote() }, { label: '新增資料夾', run: () => createFolder() }, { label: '新增 Canvas', run: () => createCanvas() }, { label: '新增時間線', run: () => createTimeline() },
     { label: '關聯圖譜', hint: settings.shortcuts.graph, run: openGraph }, { label: '分割目前筆記', hint: settings.shortcuts.split, run: splitCurrentNote }, { label: '重新讀取筆記庫', run: refreshVault }, { label: '設定', run: openSettings }
   ];
+  const specialDocuments = vault ? [...vault.canvasNodes(), ...vault.timelineNodes()].map(node => ({
+    label: basename(node.path).replace(/\.(canvas|timeline)$/i, ''),
+    hint: dirname(node.path),
+    kind: node.ext === 'timeline' ? '時間線' : 'Canvas',
+    run: () => openPath(node.path)
+  })) : [];
   $('commandSearch').placeholder = '輸入指令或筆記名稱…'; $('commandSearch').value = ''; $('commandDialog').showModal();
   const render = () => {
     const q = $('commandSearch').value.toLowerCase(); $('commandResults').innerHTML = '';
-    const rows = [...commands.map(item => ({ ...item, kind: '指令' })), ...(index?.entries || []).map(entry => ({ label: noteStem(entry.path), hint: dirname(entry.path), kind: '筆記', run: () => openPath(entry.path) }))].filter(item => `${item.label} ${item.hint || ''}`.toLowerCase().includes(q)).slice(0, 60);
-    rows.forEach(item => { const button = document.createElement('button'); button.type = 'button'; button.className = 'command-result'; button.innerHTML = '<span></span><span></span><small></small>'; button.children[0].textContent = item.kind === '筆記' ? '▤' : '›'; button.children[1].textContent = item.label; button.children[2].textContent = item.hint || item.kind; button.onclick = () => { $('commandDialog').close(); item.run(); }; $('commandResults').append(button); });
+    const rows = [...commands.map(item => ({ ...item, kind: '指令' })), ...(index?.entries || []).map(entry => ({ label: noteStem(entry.path), hint: dirname(entry.path), kind: '筆記', run: () => openPath(entry.path) })), ...specialDocuments].filter(item => `${item.label} ${item.hint || ''}`.toLowerCase().includes(q)).slice(0, 60);
+    rows.forEach(item => { const button = document.createElement('button'); button.type = 'button'; button.className = 'command-result'; button.innerHTML = '<span></span><span></span><small></small>'; button.children[0].textContent = item.kind === '筆記' ? '▤' : item.kind === '時間線' ? '⌁' : item.kind === 'Canvas' ? '◇' : '›'; button.children[1].textContent = item.label; button.children[2].textContent = item.hint || item.kind; button.onclick = () => { $('commandDialog').close(); item.run(); }; $('commandResults').append(button); });
   };
   const listener = render; $('commandSearch').addEventListener('input', listener); render(); setTimeout(() => $('commandSearch').focus(), 0);
   $('commandDialog').addEventListener('close', () => $('commandSearch').removeEventListener('input', listener), { once: true });
 }
 
 async function refreshVault() {
-  if (!vault) return;
-  if (dirty || [...secondaryPanes.values()].some(pane => pane.dirty)) await saveAllPanes(true);
-  if (settingsFolderHandle) await loadSettingsFile(settingsFolderHandle);
-  const previousModified = currentPath ? vault.node(currentPath)?.lastModified : null;
-  await vault.scan();
-  if (fileClipboard && !vault.node(fileClipboard.path)) fileClipboard = null;
-  await rebuildIndex(); renderTree();
-  const current = vault.node(currentPath);
-  if (current && previousModified && current.lastModified !== previousModified && !dirty) await openPath(currentPath, false, true);
-  if (!current && currentPath) { tabs = tabs.filter(path => path !== currentPath); currentPath = ''; showView('welcome'); renderTabs(); }
-  toast('已重新讀取筆記庫');
+  if (!vault || fileOperationDepth > 0) return;
+  beginFileOperation('正在重新讀取筆記庫…');
+  try {
+    if (dirty || [...secondaryPanes.values()].some(pane => pane.dirty)) await saveAllPanes(true);
+    if (dirty || [...secondaryPanes.values()].some(pane => pane.dirty)) return toast('仍有內容尚未儲存；請先處理衝突再重新讀取', true);
+    if (settingsFolderHandle) await loadSettingsFile(settingsFolderHandle);
+    const previousModified = currentPath ? vault.node(currentPath)?.lastModified : null;
+    await vault.scan();
+    if (fileClipboard && !vault.node(fileClipboard.path)) fileClipboard = null;
+    await rebuildIndex(); renderTree();
+    const current = vault.node(currentPath);
+    if (current && previousModified && current.lastModified !== previousModified && !dirty) await openPath(currentPath, false, true);
+    if (!current && currentPath && !dirty) { tabs = tabs.filter(path => path !== currentPath); currentPath = ''; currentType = ''; currentCanvasValid = true; currentTimelineValid = true; showView('welcome'); renderTabs(); }
+    toast('已重新讀取筆記庫');
+  } finally {
+    endFileOperation();
+  }
 }
 
 async function saveAllPanes(silent = false) {
@@ -1441,7 +1922,7 @@ function openSettings() {
 
 // Main controls
 $('openVault').onclick = openVaultPicker; $('settingsChangeVault').onclick = openVaultPicker;
-$('newNote').onclick = () => createNote(); $('newFolder').onclick = () => createFolder(); $('newCanvas').onclick = () => createCanvas(); $('refreshVault').onclick = refreshVault;
+$('newNote').onclick = () => createNote(); $('newFolder').onclick = () => createFolder(); $('newCanvas').onclick = () => createCanvas(); $('newTimeline').onclick = () => createTimeline(); $('refreshVault').onclick = refreshVault;
 $('splitCurrent').onclick = event => showMenu([
   { label: '向右分割目前筆記', action: () => splitCurrentNote('right') },
   { label: '向下分割目前筆記', action: () => splitCurrentNote('bottom') },
@@ -1479,6 +1960,9 @@ $('goBack').onclick = () => { if (historyIndex > 0) openPath(history[--historyIn
 $('goForward').onclick = () => { if (historyIndex < history.length - 1) openPath(history[++historyIndex], false, true).then(updateHistoryButtons); };
 $('openGraph').onclick = toggleGraphDock; $('closeGraph').onclick = closeGraphDock; $('graphScope').onchange = updateGraph; $('graphDepth').oninput = updateGraph; $('graphFilter').oninput = updateGraph; $('graphIsolates').onclick = () => { $('graphIsolates').classList.toggle('active'); updateGraph(); };
 $('canvasAddText').onclick = () => canvasView.addText(); $('canvasAddNote').onclick = () => canvasView.addNote(); $('canvasAddLink').onclick = async () => { const url = await ask('新增網頁連結', 'https://', '輸入要放進 Canvas 的網址'); if (url) canvasView.addLink(url); }; $('canvasAddGroup').onclick = () => canvasView.addGroup(); $('canvasUndo').onclick = () => canvasView.undo(); $('canvasRedo').onclick = () => canvasView.redo(); $('canvasZoomOut').onclick = () => canvasView.zoomBy(1 / 1.2); $('canvasZoomReset').onclick = () => canvasView.resetView(); $('canvasZoomIn').onclick = () => canvasView.zoomBy(1.2); $('canvasFit').onclick = () => canvasView.fit(); $('closeCanvas').onclick = () => currentPath && closeTab(currentPath);
+$('timelineTitle').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); } if (event.key === 'Escape') { event.currentTarget.value = basename(currentPath).replace(/\.timeline$/i, ''); event.currentTarget.blur(); } });
+$('timelineTitle').addEventListener('change', () => { if (currentType === 'timeline') renamePath(currentPath, $('timelineTitle').value); });
+$('closeTimeline').onclick = () => currentPath && closeTab(currentPath);
 
 $('attachmentFolder').onchange = () => { settings.attachmentFolder = $('attachmentFolder').value.trim() || 'attachments'; persistSettings(); };
 $('trashMode').onchange = () => { settings.trashMode = $('trashMode').value; persistSettings(); };
@@ -1488,6 +1972,10 @@ $('settingsFileName').onchange = () => { settings.settingsFileName = safeName($(
 $('chooseSettingsFolder').onclick = chooseSettingsFolder;
 
 addEventListener('keydown', event => {
+  if (fileOperationDepth > 0) {
+    if (!event.target.closest?.('dialog')) event.preventDefault();
+    return;
+  }
   if (event.target.classList?.contains('shortcut-input')) return;
   const typing = event.target.matches?.('input,textarea,[contenteditable]') || Boolean(event.target.closest?.('[contenteditable]'));
   const clipboardShortcut = (event.ctrlKey || event.metaKey) && !event.altKey;
@@ -1503,13 +1991,13 @@ addEventListener('keydown', event => {
   else if (eventMatchesShortcut(event, settings.shortcuts.rename) && selectedPath && !typing) { event.preventDefault(); renamePath(selectedPath); }
   else if (eventMatchesShortcut(event, settings.shortcuts.toggleLeft) && !typing) { event.preventDefault(); if (innerWidth <= 760) app.classList.toggle('left-open'); else { app.classList.toggle('left-collapsed'); $('showLeft').classList.toggle('hidden', !app.classList.contains('left-collapsed')); } }
   else if (eventMatchesShortcut(event, settings.shortcuts.split) && !typing) { event.preventDefault(); splitCurrentNote(); }
-  if (event.key === 'Delete' && selectedPath && currentView !== 'canvas' && !event.target.matches('input,textarea,[contenteditable]')) { event.preventDefault(); deletePath(selectedPath); }
+  if (event.key === 'Delete' && selectedPath && !['canvas', 'timeline'].includes(currentView) && !event.target.matches('input,textarea,[contenteditable]')) { event.preventDefault(); deletePath(selectedPath); }
   if (event.key === 'Escape') { hideMobilePanels(); $('contextMenu').classList.add('hidden'); $('wikiSuggest').classList.add('hidden'); }
 });
 
 addEventListener('beforeunload', event => { if (dirty || [...secondaryPanes.values()].some(pane => pane.dirty)) { event.preventDefault(); event.returnValue = ''; } });
-document.addEventListener('visibilitychange', () => { const anyDirty = dirty || [...secondaryPanes.values()].some(pane => pane.dirty); if (document.hidden && anyDirty) saveAllPanes(true); else if (!document.hidden && vault && !anyDirty) refreshVault(); });
-addEventListener('focus', () => { if (vault && !dirty && ![...secondaryPanes.values()].some(pane => pane.dirty) && document.visibilityState === 'visible') refreshVault(); });
+document.addEventListener('visibilitychange', () => { const anyDirty = dirty || [...secondaryPanes.values()].some(pane => pane.dirty); if (document.hidden && anyDirty) saveAllPanes(true); else if (!document.hidden && vault && !anyDirty && fileOperationDepth === 0) refreshVault(); });
+addEventListener('focus', () => { if (vault && fileOperationDepth === 0 && !dirty && ![...secondaryPanes.values()].some(pane => pane.dirty) && document.visibilityState === 'visible') refreshVault(); });
 
 async function restore() {
   renderTree(); applyViewMode();
