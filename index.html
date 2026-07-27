@@ -7,7 +7,7 @@
   <meta name="description" content="直接編輯本機 Markdown 筆記庫的離線優先筆記工具">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=21">
   <title>MySyncNote</title>
 </head>
 <body>
@@ -178,7 +178,7 @@
             <span>⌕</span>
             <input id="timelineSearch" type="search" placeholder="搜尋事件內容" autocomplete="off">
           </label>
-          <span class="timeline-daw-help">雙擊空白處新增 · 拖曳卡片移動 · 拉右側改長度</span>
+          <span class="timeline-daw-help">Shift／框選多選 · 拖曳吸附小節 · 卡片右側改長度 · 軌道底部改高度</span>
         </div>
         <div class="timeline-shell">
           <main id="timelineStage" class="timeline-stage"></main>
@@ -230,6 +230,6 @@
     <form method="dialog"><input id="commandSearch" placeholder="輸入指令或筆記名稱…" autocomplete="off"><div id="commandResults" class="command-results"></div></form>
   </dialog>
   <div id="toast" class="toast hidden" role="status"></div>
-  <script type="module" src="js/app.js"></script>
+  <script type="module" src="js/app.js?v=21"></script>
 </body>
 </html>

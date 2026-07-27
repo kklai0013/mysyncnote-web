@@ -103,7 +103,7 @@ export function createEmptyTimeline(title = '未命名時間線') {
     title: String(title || '未命名時間線'),
     calendar: { mode: 'flexible', timeZone: 'local' },
     trackGroups: [],
-    tracks: [{ id: trackId, name: '主線', color: COLORS[0], groupId: null, order: 0 }],
+    tracks: [{ id: trackId, name: '主線', color: COLORS[0], groupId: null, height: 144, order: 0 }],
     branches: [{ id: 'main', name: '主時間線', parentId: null, fromEventId: null, color: COLORS[0], order: 0 }],
     variantGroups: [],
     events: [],
@@ -130,6 +130,7 @@ export function normalizeTimeline(source, fallbackTitle = '未命名時間線') 
     ...group,
     id: uniqueId(group?.id, 'track-group', trackGroupIds),
     name: String(group?.name || `資料夾 ${index + 1}`),
+    color: String(group?.color || COLORS[index % COLORS.length]),
     collapsed: Boolean(group?.collapsed),
     order: finite(group?.order, index * 1000)
   })).sort((a, b) => a.order - b.order);
@@ -142,11 +143,12 @@ export function normalizeTimeline(source, fallbackTitle = '未命名時間線') 
     name: String(track?.name || `軌道 ${index + 1}`),
     color: String(track?.color || COLORS[index % COLORS.length]),
     groupId: validTrackGroupIds.has(track?.groupId) ? track.groupId : null,
+    height: Math.min(480, Math.max(84, finite(track?.height, 144))),
     order: finite(track?.order, index * 1000)
   }));
   if (!document.tracks.length) {
     const trackId = uniqueId('track-main', 'track', trackIds);
-    document.tracks.push({ id: trackId, name: '主線', color: COLORS[0], groupId: null, order: 0 });
+    document.tracks.push({ id: trackId, name: '主線', color: COLORS[0], groupId: null, height: 144, order: 0 });
   }
   document.tracks.sort((a, b) => a.order - b.order);
   const validTrackIds = new Set(document.tracks.map(track => track.id));
@@ -203,6 +205,7 @@ export function normalizeTimeline(source, fallbackTitle = '未命名時間線') 
       id: eventId,
       title: String(event?.title || `未命名事件 ${index + 1}`),
       description: String(event?.description ?? event?.summary ?? ''),
+      expanded: Boolean(event?.expanded),
       time,
       trackIds: requestedTracks.length ? requestedTracks : [document.tracks[0].id],
       branchId: validBranchIds.has(event?.branchId) ? event.branchId : 'main',

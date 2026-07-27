@@ -188,3 +188,17 @@ test('搜尋會涵蓋描述、標籤、筆記路徑、軌道和分支', () => {
     assert.equal(visibleEvents(normalized, { query }).length, 1);
   }
 });
+
+test('軌道高度與事件展開狀態會正規化並保存', () => {
+  const data = normalizeTimeline({
+    ...createEmptyTimeline('高度測試'),
+    tracks: [
+      { id: 'small', name: '太小', color: '#78dba0', height: 20, order: 0 },
+      { id: 'large', name: '太大', color: '#7fb5ff', height: 999, order: 1000 }
+    ],
+    events: [event('expanded', { trackIds: ['small'], expanded: true })]
+  });
+  assert.equal(data.tracks[0].height, 84);
+  assert.equal(data.tracks[1].height, 480);
+  assert.equal(data.events[0].expanded, true);
+});
