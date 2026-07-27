@@ -1,4 +1,4 @@
-import { createEmptyTimeline, normalizeTimeline, validateTimeline } from './timeline.js?v=21';
+import { createEmptyTimeline, normalizeTimeline, validateTimeline } from './timeline.js?v=24';
 import { LiveMarkdownEditor } from './live-editor.js';
 
 const COLORS = ['#78dba0', '#7fb5ff', '#d99cff', '#f4b86a', '#ff8d8d', '#69d4d0', '#c7d36f'];
@@ -8,6 +8,7 @@ const DEFAULT_TRACK_HEIGHT = 144;
 const BASE_UNIT_WIDTH = 56;
 const EVENT_MIME = 'text/mysyncnote-timeline-event';
 const TRACK_MIME = 'text/mysyncnote-timeline-track';
+const GROUP_MIME = 'text/mysyncnote-timeline-group';
 
 function id(prefix) {
   return globalThis.crypto?.randomUUID?.() || `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -141,6 +142,7 @@ export class TimelineView {
     this.query = '';
     this.selectedEventId = '';
     this.selectedTrackId = '';
+    this.selectedGroupId = '';
     this.selectedEventIds = new Set();
     this.selectedTrackIds = new Set();
     this.undoStack = [];
@@ -198,6 +200,7 @@ export class TimelineView {
     for (const event of this.data.events) syncClipTime(event);
     this.key = options.key || '';
     this.selectedEventId = '';
+    this.selectedGroupId = '';
     this.selectedEventIds.clear();
     this.selectedTrackIds.clear();
     this.undoStack = [];
@@ -283,10 +286,12 @@ export class TimelineView {
   reconcileSelection() {
     const eventIds = new Set(this.data.events.map(event => event.id));
     const trackIds = new Set(this.data.tracks.map(track => track.id));
+    const groupIds = new Set(this.data.trackGroups.map(group => group.id));
     this.selectedEventIds = new Set([...this.selectedEventIds].filter(eventId => eventIds.has(eventId)));
     this.selectedTrackIds = new Set([...this.selectedTrackIds].filter(trackId => trackIds.has(trackId)));
     if (!eventIds.has(this.selectedEventId)) this.selectedEventId = '';
     if (!trackIds.has(this.selectedTrackId)) this.selectedTrackId = this.data.tracks[0]?.id || '';
+    if (!groupIds.has(this.selectedGroupId)) this.selectedGroupId = '';
   }
 
   undo() {
@@ -346,16 +351,61 @@ export class TimelineView {
     const groups = [...this.data.trackGroups].sort((a, b) => a.order - b.order);
     const validGroups = new Set(groups.map(group => group.id));
     const result = this.data.tracks.filter(track => !validGroups.has(track.groupId)).sort((a, b) => a.order - b.order);
-    for (const group of groups) {
+    const appendGroup = group => {
+      for (const child of groups.filter(candidate => candidate.parentId === group.id)) appendGroup(child);
       result.push(...this.data.tracks.filter(track => track.groupId === group.id).sort((a, b) => a.order - b.order));
-    }
+    };
+    for (const group of groups.filter(group => !group.parentId)) appendGroup(group);
     return result;
+  }
+
+  descendantGroupIds(groupId) {
+    const descendants = new Set();
+    const visit = parentId => {
+      for (const group of this.data.trackGroups.filter(item => item.parentId === parentId)) {
+        if (descendants.has(group.id)) continue;
+        descendants.add(group.id);
+        visit(group.id);
+      }
+    };
+    visit(groupId);
+    return descendants;
+  }
+
+  groupTrackIds(groupId) {
+    const groupIds = this.descendantGroupIds(groupId);
+    groupIds.add(groupId);
+    return this.data.tracks.filter(track => groupIds.has(track.groupId)).map(track => track.id);
+  }
+
+  startGroupDrag(dragEvent, group) {
+    this.selectedGroupId = group.id;
+    const payload = { groupId: group.id };
+    this.dragPayload = payload;
+    dragEvent.dataTransfer.setData(GROUP_MIME, JSON.stringify(payload));
+    dragEvent.dataTransfer.effectAllowed = 'move';
+    this.renderSelection();
+  }
+
+  moveGroupInto(groupId, parentId) {
+    if (!groupId || groupId === parentId || this.descendantGroupIds(groupId).has(parentId)) return;
+    this.selectedGroupId = groupId;
+    this.transact('移動軌道資料夾', data => {
+      const group = data.trackGroups.find(item => item.id === groupId);
+      const parent = data.trackGroups.find(item => item.id === parentId);
+      if (!group || !parent) return;
+      group.parentId = parent.id;
+      parent.collapsed = false;
+    });
   }
 
   selectEvent(eventId, additive = false) {
     const target = this.data.events.find(event => event.id === eventId);
     if (!target) return;
-    if (!additive) this.selectedEventIds.clear();
+    if (!additive) {
+      this.selectedEventIds.clear();
+      this.selectedGroupId = '';
+    }
     if (additive && this.selectedEventIds.has(eventId)) this.selectedEventIds.delete(eventId);
     else this.selectedEventIds.add(eventId);
     this.selectedEventId = this.selectedEventIds.has(eventId) ? eventId : [...this.selectedEventIds].at(-1) || '';
@@ -366,7 +416,10 @@ export class TimelineView {
 
   selectTrack(trackId, additive = false) {
     if (!this.data.tracks.some(track => track.id === trackId)) return;
-    if (!additive) this.selectedTrackIds.clear();
+    if (!additive) {
+      this.selectedTrackIds.clear();
+      this.selectedGroupId = '';
+    }
     if (additive && this.selectedTrackIds.has(trackId)) this.selectedTrackIds.delete(trackId);
     else this.selectedTrackIds.add(trackId);
     this.selectedTrackId = this.selectedTrackIds.has(trackId) ? trackId : [...this.selectedTrackIds].at(-1) || trackId;
@@ -378,6 +431,7 @@ export class TimelineView {
     this.selectedEventIds.clear();
     this.selectedTrackIds.clear();
     this.selectedEventId = '';
+    this.selectedGroupId = '';
     this.renderSelection();
   }
 
@@ -429,20 +483,31 @@ export class TimelineView {
     }, { kind: 'track', id: trackId });
   }
 
-  addTrackGroup() {
+  addTrackGroup(options = {}) {
     const groupId = id('track-group');
     const selectedIds = this.selectedTrackIds.size
       ? new Set(this.selectedTrackIds)
       : new Set(this.selectedTrack()?.id ? [this.selectedTrack().id] : []);
+    const selectedParents = new Set(
+      this.data.tracks.filter(track => selectedIds.has(track.id)).map(track => track.groupId || null)
+    );
+    const parentId = options.parentId !== undefined
+      ? options.parentId
+      : this.selectedGroupId || (selectedParents.size === 1 ? [...selectedParents][0] : null);
+    const moveSelected = options.moveSelected !== false;
+    this.selectedGroupId = groupId;
     this.transact('新增軌道資料夾', data => {
       data.trackGroups.push({
         id: groupId,
         name: `資料夾 ${data.trackGroups.length + 1}`,
         color: COLORS[data.trackGroups.length % COLORS.length],
+        parentId: data.trackGroups.some(group => group.id === parentId) ? parentId : null,
         collapsed: false,
         order: nextOrder(data.trackGroups)
       });
-      for (const track of data.tracks) if (selectedIds.has(track.id)) track.groupId = groupId;
+      if (moveSelected) {
+        for (const track of data.tracks) if (selectedIds.has(track.id)) track.groupId = groupId;
+      }
     }, { kind: 'group', id: groupId });
   }
 
@@ -490,11 +555,14 @@ export class TimelineView {
   }
 
   removeTrackGroup(groupId) {
-    if (!this.data.trackGroups.some(item => item.id === groupId)) return;
+    const group = this.data.trackGroups.find(item => item.id === groupId);
+    if (!group) return;
     this.transact('移除軌道資料夾', data => {
       data.trackGroups = data.trackGroups.filter(item => item.id !== groupId);
-      for (const track of data.tracks) if (track.groupId === groupId) track.groupId = null;
+      for (const track of data.tracks) if (track.groupId === groupId) track.groupId = group.parentId || null;
+      for (const child of data.trackGroups) if (child.parentId === groupId) child.parentId = group.parentId || null;
     });
+    if (this.selectedGroupId === groupId) this.selectedGroupId = group.parentId || '';
   }
 
   moveEvents(payload, trackId, position) {
@@ -542,6 +610,7 @@ export class TimelineView {
       if (options.doubleClickEdit) {
         control.readOnly = true;
         control.classList.remove('editing');
+        if (options.onLockedDrag) control.draggable = true;
       }
     });
     if (control.tagName === 'INPUT' && control.type === 'text') {
@@ -556,6 +625,7 @@ export class TimelineView {
       control.readOnly = true;
       control.dataset.doubleClickEdit = '';
       control.title = options.editTitle || '雙擊編輯';
+      if (options.onLockedDrag) control.draggable = true;
       control.addEventListener('click', event => {
         if (control.readOnly) return;
         event.stopPropagation();
@@ -567,6 +637,7 @@ export class TimelineView {
         event.preventDefault();
         event.stopPropagation();
         control.readOnly = false;
+        if (options.onLockedDrag) control.draggable = false;
         control.classList.add('editing');
         control.focus();
         if (options.selectOnEdit) control.select?.();
@@ -577,7 +648,14 @@ export class TimelineView {
           control.blur();
         }
       });
-      control.addEventListener('dragstart', event => event.stopPropagation());
+      control.addEventListener('dragstart', event => {
+        event.stopPropagation();
+        if (!control.readOnly || !options.onLockedDrag) {
+          event.preventDefault();
+          return;
+        }
+        options.onLockedDrag(event);
+      });
     } else {
       stopControlEvents(control);
     }
@@ -621,12 +699,15 @@ export class TimelineView {
     const validGroups = new Set(groups.map(group => group.id));
     const ungrouped = this.data.tracks.filter(track => !validGroups.has(track.groupId)).sort((a, b) => a.order - b.order);
     for (const track of ungrouped) board.append(this.makeTrackRow(track, visibleEvents, totalWidth, unitWidth));
-    for (const group of groups) {
-      board.append(this.makeGroupRow(group, totalWidth));
-      if (group.collapsed) continue;
+    const appendGroup = (group, depth) => {
+      board.append(this.makeGroupRow(group, totalWidth, depth));
+      if (group.collapsed) return;
+      const children = groups.filter(candidate => candidate.parentId === group.id);
+      for (const child of children) appendGroup(child, depth + 1);
       const tracks = this.data.tracks.filter(track => track.groupId === group.id).sort((a, b) => a.order - b.order);
-      for (const track of tracks) board.append(this.makeTrackRow(track, visibleEvents, totalWidth, unitWidth, true));
-    }
+      for (const track of tracks) board.append(this.makeTrackRow(track, visibleEvents, totalWidth, unitWidth, depth + 1));
+    };
+    for (const group of groups.filter(group => !group.parentId)) appendGroup(group, 0);
 
     scroll.append(board);
     this.stage.append(scroll);
@@ -660,18 +741,33 @@ export class TimelineView {
     return row;
   }
 
-  makeGroupRow(group, totalWidth) {
-    const memberTracks = this.data.tracks.filter(track => track.groupId === group.id);
-    const row = element('div', 'timeline-track-folder-row');
+  makeGroupRow(group, totalWidth, depth = 0) {
+    const directTracks = this.data.tracks.filter(track => track.groupId === group.id);
+    const allTrackIds = this.groupTrackIds(group.id);
+    const childCount = this.data.trackGroups.filter(item => item.parentId === group.id).length;
+    const row = element('div', `timeline-track-folder-row${this.selectedGroupId === group.id ? ' selected' : ''}`);
     row.dataset.groupId = group.id;
+    row.classList.toggle('nested', depth > 0);
+    row.style.setProperty('--folder-depth', depth);
+    row.style.setProperty('--folder-indent', `${9 + depth * 18}px`);
     row.style.setProperty('--group-color', group.color || COLORS[0]);
     const label = element('div', 'timeline-track-folder-label');
     label.onclick = clickEvent => {
       if (clickEvent.target.closest('button') || (clickEvent.target.closest('input') && !isLockedTextControl(clickEvent.target))) return;
+      this.selectedGroupId = group.id;
       if (!isAdditive(clickEvent)) this.selectedTrackIds.clear();
-      for (const track of memberTracks) this.selectedTrackIds.add(track.id);
-      this.selectedTrackId = memberTracks.at(-1)?.id || this.selectedTrackId;
+      for (const trackId of allTrackIds) this.selectedTrackIds.add(trackId);
+      this.selectedTrackId = allTrackIds.at(-1) || this.selectedTrackId;
       this.renderSelection();
+    };
+    label.draggable = true;
+    label.ondragstart = dragEvent => {
+      if (dragEvent.target.matches('input,button')) return dragEvent.preventDefault();
+      this.startGroupDrag(dragEvent, group);
+    };
+    label.ondragend = () => {
+      this.dragPayload = null;
+      stage?.classList.remove('drop-target');
     };
     const collapse = button(group.collapsed ? '›' : '⌄', group.collapsed ? '展開資料夾' : '收合資料夾');
     collapse.className = 'timeline-folder-toggle';
@@ -688,51 +784,74 @@ export class TimelineView {
       fallback: '未命名資料夾',
       doubleClickEdit: true,
       selectOnEdit: true,
-      editTitle: '雙擊重新命名資料夾'
+      editTitle: '雙擊重新命名資料夾',
+      onLockedDrag: dragEvent => this.startGroupDrag(dragEvent, group)
     });
-    nameWrap.append(name, element('small', '', `${memberTracks.length} 條軌道`));
+    const summary = [
+      allTrackIds.length ? `${allTrackIds.length} 條軌道` : '',
+      childCount ? `${childCount} 個子資料夾` : ''
+    ].filter(Boolean).join(' · ') || '空資料夾';
+    nameWrap.append(name, element('small', '', summary));
+    const addChild = button('＋', '在這個資料夾內新增子資料夾');
+    addChild.className = 'timeline-folder-add';
+    addChild.onclick = clickEvent => {
+      clickEvent.stopPropagation();
+      this.addTrackGroup({ parentId: group.id, moveSelected: false });
+    };
     const remove = button('×', '解除資料夾（保留裡面的軌道）');
     remove.className = 'timeline-folder-remove';
     remove.onclick = clickEvent => {
       clickEvent.stopPropagation();
       this.removeTrackGroup(group.id);
     };
-    label.append(collapse, badge, nameWrap, remove);
+    label.append(collapse, badge, nameWrap, addChild, remove);
 
     const stage = element('div', 'timeline-track-folder-stage');
     stage.style.width = `${totalWidth}px`;
-    stage.append(element('span', '', memberTracks.length ? `資料夾軌道 · ${memberTracks.length} 條` : '把軌道拖到這裡'));
-    const acceptTrack = dragEvent => {
-      if (!dragEvent.dataTransfer.types.includes(TRACK_MIME)) return false;
+    stage.append(element('span', '', directTracks.length || childCount
+      ? `第 ${depth + 1} 層 · 可放軌道或子資料夾`
+      : '把軌道或資料夾拖到這裡'));
+    const acceptDrop = dragEvent => {
+      if (!dragEvent.dataTransfer.types.includes(TRACK_MIME) && !dragEvent.dataTransfer.types.includes(GROUP_MIME)) return false;
       dragEvent.preventDefault();
       stage.classList.add('drop-target');
       return true;
     };
-    row.ondragover = acceptTrack;
+    row.ondragover = acceptDrop;
     row.ondragleave = dragEvent => {
       if (!row.contains(dragEvent.relatedTarget)) stage.classList.remove('drop-target');
     };
     row.ondrop = dragEvent => {
-      const payload = this.readDragPayload(dragEvent, TRACK_MIME);
-      if (!payload) return;
       dragEvent.preventDefault();
       stage.classList.remove('drop-target');
-      const trackIds = payload.trackIds?.length ? payload.trackIds : [payload.anchorId];
-      this.transact('移入軌道資料夾', data => {
-        const selected = new Set(trackIds);
-        for (const track of data.tracks) if (selected.has(track.id)) track.groupId = group.id;
-        const target = data.trackGroups.find(item => item.id === group.id);
-        if (target) target.collapsed = false;
-      });
+      const groupPayload = dragEvent.dataTransfer.types.includes(GROUP_MIME)
+        ? this.dragPayload || this.readDragPayload(dragEvent, GROUP_MIME)
+        : null;
+      if (groupPayload?.groupId) {
+        this.moveGroupInto(groupPayload.groupId, group.id);
+      } else {
+        const payload = this.dragPayload || this.readDragPayload(dragEvent, TRACK_MIME);
+        if (!payload) return;
+        const trackIds = payload.trackIds?.length ? payload.trackIds : [payload.anchorId];
+        this.transact('移入軌道資料夾', data => {
+          const selected = new Set(trackIds);
+          for (const track of data.tracks) if (selected.has(track.id)) track.groupId = group.id;
+          const target = data.trackGroups.find(item => item.id === group.id);
+          if (target) target.collapsed = false;
+        });
+      }
+      this.dragPayload = null;
     };
     row.append(label, stage);
     return row;
   }
 
-  makeTrackRow(track, visibleEvents, totalWidth, unitWidth, nested = false) {
+  makeTrackRow(track, visibleEvents, totalWidth, unitWidth, nestedDepth = 0) {
     const height = clamp(finite(track.height, DEFAULT_TRACK_HEIGHT), 84, 480);
-    const row = element('div', `timeline-daw-track${nested ? ' nested' : ''}${this.selectedTrackIds.has(track.id) ? ' selected' : ''}`);
+    const row = element('div', `timeline-daw-track${nestedDepth ? ' nested' : ''}${this.selectedTrackIds.has(track.id) ? ' selected' : ''}`);
     row.dataset.trackId = track.id;
+    row.style.setProperty('--folder-depth', nestedDepth);
+    row.style.setProperty('--track-indent', `${9 + nestedDepth * 18}px`);
     row.style.height = `${height}px`;
     const label = element('div', 'timeline-daw-track-label');
     label.onclick = clickEvent => {
@@ -742,11 +861,7 @@ export class TimelineView {
     label.draggable = true;
     label.ondragstart = dragEvent => {
       if (dragEvent.target.matches('input,select,button')) return dragEvent.preventDefault();
-      if (!this.selectedTrackIds.has(track.id)) this.selectTrack(track.id, false);
-      const payload = { anchorId: track.id, trackIds: [...this.selectedTrackIds] };
-      this.dragPayload = payload;
-      dragEvent.dataTransfer.setData(TRACK_MIME, JSON.stringify(payload));
-      dragEvent.dataTransfer.effectAllowed = 'move';
+      this.startTrackDrag(dragEvent, track);
     };
     const head = element('div', 'timeline-track-head');
     const color = input(track.color, 'color');
@@ -763,7 +878,8 @@ export class TimelineView {
       selectOnFocus: this.pendingFocus?.kind === 'track' && this.pendingFocus.id === track.id,
       doubleClickEdit: true,
       selectOnEdit: true,
-      editTitle: '雙擊重新命名軌道'
+      editTitle: '雙擊重新命名軌道',
+      onLockedDrag: dragEvent => this.startTrackDrag(dragEvent, track)
     });
     const count = element('small', '', String(this.data.events.filter(event => event.trackIds[0] === track.id).length));
     const remove = button('×', '刪除軌道');
@@ -775,7 +891,7 @@ export class TimelineView {
     };
     head.append(color, name, count, remove);
     label.append(head);
-    if (nested) {
+    if (nestedDepth) {
       const group = this.data.trackGroups.find(item => item.id === track.groupId);
       const folderMeta = element('div', 'timeline-track-folder-meta');
       folderMeta.append(element('span', '', group?.name || '資料夾'));
@@ -854,6 +970,18 @@ export class TimelineView {
     card.style.width = `${eventDuration(event) * unitWidth}px`;
     card.style.height = `${cardHeight}px`;
     card.style.setProperty('--track-color', track?.color || COLORS[0]);
+    card.draggable = true;
+    card.ondragstart = dragEvent => {
+      if (dragEvent.target.closest('[contenteditable="true"],input:not([readonly]),textarea,select,button,.timeline-clip-resize')) {
+        dragEvent.preventDefault();
+        return;
+      }
+      this.startEventDrag(dragEvent, event);
+    };
+    card.ondragend = () => {
+      this.dragPayload = null;
+      this.clearDropPreview();
+    };
     card.onclick = clickEvent => {
       const control = clickEvent.target.closest('input,textarea,select,button');
       if (control && !isLockedTextControl(clickEvent.target)) return;
@@ -881,15 +1009,7 @@ export class TimelineView {
     grip.draggable = true;
     grip.ondragstart = dragEvent => {
       dragEvent.stopPropagation();
-      if (!this.selectedEventIds.has(event.id)) this.selectEvent(event.id, false);
-      const payload = { anchorId: event.id, eventIds: [...this.selectedEventIds] };
-      this.dragPayload = payload;
-      dragEvent.dataTransfer.setData(EVENT_MIME, JSON.stringify(payload));
-      dragEvent.dataTransfer.effectAllowed = 'move';
-    };
-    grip.ondragend = () => {
-      this.dragPayload = null;
-      this.clearDropPreview();
+      this.startEventDrag(dragEvent, event);
     };
     const title = input(event.title);
     title.className = 'timeline-clip-title';
@@ -899,7 +1019,8 @@ export class TimelineView {
       selectOnFocus: this.pendingFocus?.kind === 'event' && this.pendingFocus.id === event.id,
       doubleClickEdit: true,
       selectOnEdit: true,
-      editTitle: '雙擊編輯事件標題'
+      editTitle: '雙擊編輯事件標題',
+      onLockedDrag: dragEvent => this.startEventDrag(dragEvent, event)
     });
     const expand = button(event.expanded ? '↥' : '↕', event.expanded ? '恢復一般高度' : '展開事件內容');
     expand.className = 'timeline-clip-expand';
@@ -968,6 +1089,22 @@ export class TimelineView {
     return card;
   }
 
+  startTrackDrag(dragEvent, track) {
+    if (!this.selectedTrackIds.has(track.id)) this.selectTrack(track.id, false);
+    const payload = { anchorId: track.id, trackIds: [...this.selectedTrackIds] };
+    this.dragPayload = payload;
+    dragEvent.dataTransfer.setData(TRACK_MIME, JSON.stringify(payload));
+    dragEvent.dataTransfer.effectAllowed = 'move';
+  }
+
+  startEventDrag(dragEvent, event) {
+    if (!this.selectedEventIds.has(event.id)) this.selectEvent(event.id, false);
+    const payload = { anchorId: event.id, eventIds: [...this.selectedEventIds] };
+    this.dragPayload = payload;
+    dragEvent.dataTransfer.setData(EVENT_MIME, JSON.stringify(payload));
+    dragEvent.dataTransfer.effectAllowed = 'move';
+  }
+
   makeMarkdownBlock(event) {
     const block = element('div', 'timeline-clip-description timeline-clip-markdown live-editor');
     block.dataset.doubleClickEdit = '';
@@ -982,6 +1119,7 @@ export class TimelineView {
     });
     live.setValue(event.description);
     block.contentEditable = 'false';
+    block.draggable = true;
     block.addEventListener('pointerdown', pointerEvent => {
       if (block.isContentEditable) pointerEvent.stopPropagation();
     });
@@ -994,6 +1132,7 @@ export class TimelineView {
       if (block.isContentEditable) return;
       before = this.snapshot();
       block.contentEditable = 'true';
+      block.draggable = false;
       block.classList.add('editing');
       live.focus();
       live.setSelectionRange(live.value().length);
@@ -1001,6 +1140,7 @@ export class TimelineView {
     block.addEventListener('blur', () => {
       if (!block.isContentEditable) return;
       block.contentEditable = 'false';
+      block.draggable = true;
       block.classList.remove('editing');
       this.data = normalizeTimeline(this.data, this.data.title);
       this.pushHistory(before);
@@ -1012,7 +1152,14 @@ export class TimelineView {
         block.blur();
       }
     });
-    block.addEventListener('dragstart', dragEvent => dragEvent.stopPropagation());
+    block.addEventListener('dragstart', dragEvent => {
+      dragEvent.stopPropagation();
+      if (block.isContentEditable) {
+        dragEvent.preventDefault();
+        return;
+      }
+      this.startEventDrag(dragEvent, event);
+    });
     return block;
   }
 
@@ -1196,6 +1343,9 @@ export class TimelineView {
     }
     for (const row of this.stage.querySelectorAll('.timeline-daw-track')) {
       row.classList.toggle('selected', this.selectedTrackIds.has(row.dataset.trackId));
+    }
+    for (const row of this.stage.querySelectorAll('.timeline-track-folder-row')) {
+      row.classList.toggle('selected', row.dataset.groupId === this.selectedGroupId);
     }
     this.root.querySelector('#timelineCursorLabel').textContent = this.selectionLabel();
   }

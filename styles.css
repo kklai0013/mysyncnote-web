@@ -582,7 +582,7 @@ button:disabled { opacity: .38; cursor: not-allowed; }
   border-radius: 6px;
   background: #252a31f2;
   box-shadow: 0 4px 12px #0005;
-  cursor: default;
+  cursor: grab;
   container-type: inline-size;
 }
 .timeline-daw-event:hover { border-color: #707984; background: #2b3139; }
@@ -656,7 +656,7 @@ button:disabled { opacity: .38; cursor: not-allowed; }
 }
 
 .timeline-daw-track.nested .timeline-daw-track-label {
-  padding-left: 25px;
+  padding-left: var(--track-indent, 25px);
   box-shadow: inset 10px 0 #101216, inset 12px 0 color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
@@ -743,15 +743,28 @@ button:disabled { opacity: .38; cursor: not-allowed; }
 }
 
 .timeline-track-folder-label {
-  padding: 7px 9px;
-  grid-template-columns: 27px 24px minmax(0, 1fr) 28px;
+  padding: 7px 9px 7px var(--folder-indent, 9px);
+  grid-template-columns: 27px 24px minmax(0, 1fr) 27px 28px;
   gap: 6px;
   background: color-mix(in srgb, var(--group-color) 10%, #1b1f24);
   box-shadow: inset 4px 0 var(--group-color);
   cursor: default;
 }
 
+.timeline-track-folder-row.nested .timeline-track-folder-label {
+  box-shadow:
+    inset 4px 0 var(--group-color),
+    inset calc(var(--folder-indent, 9px) - 7px) 0 #101216;
+}
+
+.timeline-track-folder-row.selected .timeline-track-folder-label {
+  background: color-mix(in srgb, var(--group-color) 20%, #20252a);
+  outline: 1px solid color-mix(in srgb, var(--group-color) 65%, transparent);
+  outline-offset: -1px;
+}
+
 .timeline-folder-toggle,
+.timeline-folder-add,
 .timeline-folder-remove {
   width: 27px;
   min-width: 27px;
@@ -772,6 +785,14 @@ button:disabled { opacity: .38; cursor: not-allowed; }
   color: var(--muted);
 }
 
+.timeline-folder-add {
+  opacity: 0;
+  color: #bfeace;
+}
+
+.timeline-track-folder-label:hover .timeline-folder-add,
+.timeline-folder-add:focus-visible,
+.timeline-track-folder-row.selected .timeline-folder-add,
 .timeline-track-folder-label:hover .timeline-folder-remove,
 .timeline-folder-remove:focus-visible {
   opacity: 1;
@@ -919,6 +940,10 @@ button:disabled { opacity: .38; cursor: not-allowed; }
   cursor: default;
 }
 
+[data-double-click-edit][draggable="true"] {
+  cursor: grab;
+}
+
 [data-double-click-edit].editing {
   cursor: text;
 }
@@ -998,7 +1023,7 @@ button:disabled { opacity: .38; cursor: not-allowed; }
   }
 
   .timeline-track-folder-label {
-    grid-template-columns: 24px 20px minmax(0, 1fr) 24px;
-    padding: 6px 5px;
+    grid-template-columns: 24px 20px minmax(0, 1fr) 24px 24px;
+    padding: 6px 5px 6px var(--folder-indent, 5px);
   }
 }

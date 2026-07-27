@@ -131,10 +131,27 @@ export function normalizeTimeline(source, fallbackTitle = '未命名時間線') 
     id: uniqueId(group?.id, 'track-group', trackGroupIds),
     name: String(group?.name || `資料夾 ${index + 1}`),
     color: String(group?.color || COLORS[index % COLORS.length]),
+    parentId: group?.parentId ? String(group.parentId) : null,
     collapsed: Boolean(group?.collapsed),
     order: finite(group?.order, index * 1000)
   })).sort((a, b) => a.order - b.order);
   const validTrackGroupIds = new Set(document.trackGroups.map(group => group.id));
+  const trackGroupById = new Map(document.trackGroups.map(group => [group.id, group]));
+  for (const group of document.trackGroups) {
+    if (!validTrackGroupIds.has(group.parentId) || group.parentId === group.id) group.parentId = null;
+  }
+  for (const group of document.trackGroups) {
+    const seen = new Set([group.id]);
+    let parentId = group.parentId;
+    while (parentId) {
+      if (seen.has(parentId)) {
+        group.parentId = null;
+        break;
+      }
+      seen.add(parentId);
+      parentId = trackGroupById.get(parentId)?.parentId || null;
+    }
+  }
 
   const trackIds = new Set();
   document.tracks = list(migratedTracks).map((track, index) => ({

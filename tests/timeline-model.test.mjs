@@ -202,3 +202,25 @@ test('軌道高度與事件展開狀態會正規化並保存', () => {
   assert.equal(data.tracks[1].height, 480);
   assert.equal(data.events[0].expanded, true);
 });
+
+test('軌道資料夾可巢狀，循環父子關係會安全解除', () => {
+  const nested = normalizeTimeline({
+    ...createEmptyTimeline('巢狀資料夾'),
+    trackGroups: [
+      { id: 'parent', name: '父資料夾', parentId: null, order: 0 },
+      { id: 'child', name: '子資料夾', parentId: 'parent', order: 1000 }
+    ]
+  });
+  assert.equal(nested.trackGroups.find(group => group.id === 'child').parentId, 'parent');
+
+  const cyclic = normalizeTimeline({
+    ...createEmptyTimeline('循環資料夾'),
+    trackGroups: [
+      { id: 'a', name: 'A', parentId: 'b', order: 0 },
+      { id: 'b', name: 'B', parentId: 'a', order: 1000 }
+    ]
+  });
+  const a = cyclic.trackGroups.find(group => group.id === 'a');
+  const b = cyclic.trackGroups.find(group => group.id === 'b');
+  assert.equal(a.parentId === null || b.parentId === null, true);
+});
