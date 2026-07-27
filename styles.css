@@ -920,7 +920,7 @@ button:disabled { opacity: .38; cursor: not-allowed; }
 
 .timeline-clip-title {
   height: 29px;
-  font-size: 14px;
+  font-size: 15px;
 }
 
 .timeline-clip-expand,
@@ -947,8 +947,8 @@ button:disabled { opacity: .38; cursor: not-allowed; }
   flex: 1 1 auto;
   margin: 5px 6px 3px;
   padding: 4px 5px;
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: 15px;
+  line-height: 1.6;
   user-select: text;
 }
 
