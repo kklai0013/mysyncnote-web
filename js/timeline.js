@@ -102,7 +102,8 @@ export function createEmptyTimeline(title = '未命名時間線') {
     version: VERSION,
     title: String(title || '未命名時間線'),
     calendar: { mode: 'flexible', timeZone: 'local' },
-    tracks: [{ id: trackId, name: '主線', color: COLORS[0], order: 0 }],
+    trackGroups: [],
+    tracks: [{ id: trackId, name: '主線', color: COLORS[0], groupId: null, order: 0 }],
     branches: [{ id: 'main', name: '主時間線', parentId: null, fromEventId: null, color: COLORS[0], order: 0 }],
     variantGroups: [],
     events: [],
@@ -124,17 +125,28 @@ export function normalizeTimeline(source, fallbackTitle = '未命名時間線') 
   document.title = String(source.title || fallbackTitle || '未命名時間線');
   document.calendar = { mode: 'flexible', timeZone: 'local', ...(source.calendar || {}) };
 
+  const trackGroupIds = new Set();
+  document.trackGroups = list(source.trackGroups).map((group, index) => ({
+    ...group,
+    id: uniqueId(group?.id, 'track-group', trackGroupIds),
+    name: String(group?.name || `資料夾 ${index + 1}`),
+    collapsed: Boolean(group?.collapsed),
+    order: finite(group?.order, index * 1000)
+  })).sort((a, b) => a.order - b.order);
+  const validTrackGroupIds = new Set(document.trackGroups.map(group => group.id));
+
   const trackIds = new Set();
   document.tracks = list(migratedTracks).map((track, index) => ({
     ...track,
     id: uniqueId(track?.id, 'track', trackIds),
     name: String(track?.name || `軌道 ${index + 1}`),
     color: String(track?.color || COLORS[index % COLORS.length]),
+    groupId: validTrackGroupIds.has(track?.groupId) ? track.groupId : null,
     order: finite(track?.order, index * 1000)
   }));
   if (!document.tracks.length) {
     const trackId = uniqueId('track-main', 'track', trackIds);
-    document.tracks.push({ id: trackId, name: '主線', color: COLORS[0], order: 0 });
+    document.tracks.push({ id: trackId, name: '主線', color: COLORS[0], groupId: null, order: 0 });
   }
   document.tracks.sort((a, b) => a.order - b.order);
   const validTrackIds = new Set(document.tracks.map(track => track.id));
@@ -169,6 +181,10 @@ export function normalizeTimeline(source, fallbackTitle = '未命名時間線') 
     if (!['exact', 'relative', 'undated'].includes(kind)) kind = 'undated';
     const notePaths = stringList(event?.notePaths?.length ? event.notePaths : event?.notePath ? [event.notePath] : []);
     const requestedTracks = stringList(event?.trackIds).filter(trackId => validTrackIds.has(trackId));
+    const numericStart = String(legacyWhen.start ?? event?.start ?? '').trim() === '' ? NaN : Number(legacyWhen.start ?? event?.start);
+    const numericEnd = String(legacyWhen.end ?? event?.end ?? '').trim() === '' ? NaN : Number(legacyWhen.end ?? event?.end);
+    const positionFallback = Number.isFinite(numericStart) ? numericStart : index * 4;
+    const durationFallback = Number.isFinite(numericStart) && Number.isFinite(numericEnd) && numericEnd > numericStart ? numericEnd - numericStart : 4;
     const time = {
       ...legacyWhen,
       kind,
@@ -178,7 +194,9 @@ export function normalizeTimeline(source, fallbackTitle = '未命名時間線') 
       momentId: legacyWhen.momentId ? String(legacyWhen.momentId) : '',
       anchorId: String(legacyWhen.anchorId || legacyWhen.relativeToEventId || ''),
       offset: finite(legacyWhen.offset?.value ?? legacyWhen.offset, 0),
-      unit: TIME_UNITS[legacyWhen.offset?.unit || legacyWhen.unit] ? (legacyWhen.offset?.unit || legacyWhen.unit) : 'day'
+      unit: TIME_UNITS[legacyWhen.offset?.unit || legacyWhen.unit] ? (legacyWhen.offset?.unit || legacyWhen.unit) : 'day',
+      position: Math.max(0, finite(legacyWhen.position, positionFallback)),
+      duration: Math.max(1, finite(legacyWhen.duration, durationFallback))
     };
     return {
       ...event,

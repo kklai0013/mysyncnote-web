@@ -154,46 +154,34 @@
         </div>
       </section>
 
-      <section id="timelineWorkspace" class="timeline-workspace hidden dock-pane timeline-pane" tabindex="-1">
+      <section id="timelineWorkspace" class="timeline-workspace timeline-daw hidden dock-pane timeline-pane" tabindex="-1">
         <header class="special-toolbar timeline-toolbar">
           <div class="special-title timeline-title-block">
             <input id="timelineTitle" class="timeline-title-input" value="時間線" aria-label="時間線檔名" spellcheck="false">
             <span id="timelineState">已儲存</span>
           </div>
-          <div class="timeline-view-switch view-switch" role="tablist" aria-label="時間線檢視">
-            <button data-timeline-view="chronology" class="active">實際時間</button>
-            <button data-timeline-view="narrative">敘事順序</button>
-            <button data-timeline-view="branches">分支／方案</button>
-          </div>
           <div class="timeline-toolbar-actions">
             <button id="timelineAddEvent">＋事件</button>
-            <button id="timelineAddSimultaneous" title="建立會和選取事件同時發生、可以共存的另一件事">＋同時</button>
             <button id="timelineAddTrack">＋軌道</button>
-            <button id="timelineAddVariant" title="為選取事件建立互斥的 A／B／C 方案">＋方案</button>
-            <button id="timelineAddBranch" title="從選取事件建立會繼續發展的時間分支">＋分支</button>
-            <button id="timelineAddChapter" class="hidden">＋章節</button>
-            <button id="timelinePlaceSelected" class="hidden">放入敘事</button>
+            <button id="timelineAddGroup">＋資料夾</button>
             <button id="timelineUndo" title="復原（Ctrl+Z）">↶</button>
             <button id="timelineRedo" title="重做（Ctrl+Y）">↷</button>
             <button id="timelineZoomOut" title="縮小">−</button>
             <button id="timelineZoomReset" title="重設縮放"><span id="timelineZoomLabel">100%</span></button>
             <button id="timelineZoomIn" title="放大">＋</button>
+            <span id="timelineCursorLabel" class="timeline-cursor-label">位置 0</span>
           </div>
-          <button id="timelineToggleInspector" class="icon-btn" title="顯示時間線結構或事件內容" aria-label="顯示時間線結構或事件內容">☷</button>
           <button id="closeTimeline" class="icon-btn close-pane" title="關閉目前時間線" aria-label="關閉目前時間線">×</button>
         </header>
         <div class="timeline-filterbar">
           <label class="search-box compact">
             <span>⌕</span>
-            <input id="timelineSearch" type="search" placeholder="搜尋事件、描述、標籤或筆記" autocomplete="off">
+            <input id="timelineSearch" type="search" placeholder="搜尋事件內容" autocomplete="off">
           </label>
-          <select id="timelineStatusFilter" aria-label="依狀態篩選"><option value="all">所有狀態</option></select>
-          <select id="timelineBranchFilter" aria-label="依分支篩選"><option value="all">所有分支</option></select>
-          <select id="timelineTrackFilter" aria-label="依軌道篩選"><option value="all">所有軌道</option></select>
+          <span class="timeline-daw-help">雙擊空白處新增 · 拖曳卡片移動 · 拉右側改長度</span>
         </div>
         <div class="timeline-shell">
           <main id="timelineStage" class="timeline-stage"></main>
-          <aside id="timelineInspector" class="timeline-inspector" aria-label="時間線事件內容"></aside>
         </div>
         <div id="timelineError" class="timeline-error hidden" role="alert"></div>
       </section>

@@ -1,15 +1,16 @@
-import { Vault, rememberVault, recalledVault, rememberSettingsFolder, recalledSettingsFolder, safeName, dirname, basename } from './storage.js?v=18';
+import { Vault, rememberVault, recalledVault, rememberSettingsFolder, recalledSettingsFolder, safeName, dirname, basename } from './storage.js?v=19';
 import { renderMarkdown, extractHeadings, extractTags, extractLinks, buildIndex, noteStem, replaceWikiTarget, parseFrontmatter } from './markdown.js';
 import { GraphView } from './graph.js';
 import { CanvasView } from './canvas.js?v=17';
 import { LiveMarkdownEditor } from './live-editor.js';
-import { TimelineView, createEmptyTimeline } from './timeline.js?v=18';
+import { createEmptyTimeline } from './timeline.js?v=19';
+import { TimelineView } from './timeline-daw.js?v=19';
 
 const $ = id => document.getElementById(id);
 const app = $('app');
 const LAYOUT_VERSION = 3;
-const DEFAULT_SHORTCUTS = { save: 'Ctrl+S', close: 'Ctrl+W', command: 'Ctrl+P', search: 'Ctrl+K', newNote: 'Ctrl+N', graph: 'Ctrl+G', rename: 'F2', toggleLeft: 'Ctrl+B', split: 'Ctrl+\\' };
-const SHORTCUT_LABELS = { save: '立即儲存', close: '關閉目前筆記或 Canvas', command: '命令面板', search: '搜尋筆記庫', newNote: '新增筆記', graph: '顯示／關閉關聯圖譜', rename: '重新命名選取項目', toggleLeft: '顯示／收起左側欄', split: '將目前筆記分割到新窗格' };
+const DEFAULT_SHORTCUTS = { save: 'Ctrl+S', close: 'Ctrl+W', command: 'Ctrl+P', search: 'Ctrl+K', newNote: 'Ctrl+N', graph: 'Ctrl+G', rename: 'F2', toggleLeft: 'Ctrl+B', split: 'Ctrl+\\', timelineNewEvent: 'Ctrl+Enter', timelineNewTrack: 'Ctrl+Shift+Enter', timelineNewGroup: 'Ctrl+Alt+Enter' };
+const SHORTCUT_LABELS = { save: '立即儲存', close: '關閉目前筆記或 Canvas', command: '命令面板', search: '搜尋筆記庫', newNote: '新增筆記', graph: '顯示／關閉關聯圖譜', rename: '重新命名選取項目', toggleLeft: '顯示／收起左側欄', split: '將目前筆記分割到新窗格', timelineNewEvent: '時間線：新增事件', timelineNewTrack: '時間線：新增軌道', timelineNewGroup: '時間線：新增軌道資料夾' };
 const settings = Object.assign({ attachmentFolder: 'attachments', trashMode: 'trash', updateLinks: true, autoSave: true, settingsFileName: 'mysyncnote-settings.json', shortcuts: { ...DEFAULT_SHORTCUTS } }, JSON.parse(localStorage.getItem('mysyncnote-preferences') || '{}'));
 settings.shortcuts = { ...DEFAULT_SHORTCUTS, ...(settings.shortcuts || {}) };
 for (const key of Object.keys(DEFAULT_SHORTCUTS)) if (typeof settings.shortcuts[key] !== 'string') settings.shortcuts[key] = '';
@@ -1879,6 +1880,9 @@ function updateShortcutHints() {
   $('fileSearch').title = settings.shortcuts.search ? `搜尋筆記庫（${settings.shortcuts.search}）` : '搜尋筆記庫';
   $('openGraph').title = `開啟或關閉關聯圖譜${settings.shortcuts.graph ? `（${settings.shortcuts.graph}）` : ''}`;
   $('splitCurrent').title = `選擇分割方向${settings.shortcuts.split ? `（${settings.shortcuts.split}）` : ''}`;
+  $('timelineAddEvent').title = `直接新增事件${settings.shortcuts.timelineNewEvent ? `（${settings.shortcuts.timelineNewEvent}）` : ''}`;
+  $('timelineAddTrack').title = `直接新增軌道${settings.shortcuts.timelineNewTrack ? `（${settings.shortcuts.timelineNewTrack}）` : ''}`;
+  $('timelineAddGroup').title = `新增軌道資料夾${settings.shortcuts.timelineNewGroup ? `（${settings.shortcuts.timelineNewGroup}）` : ''}`;
 }
 
 function renderShortcutSettings() {
@@ -1979,7 +1983,10 @@ addEventListener('keydown', event => {
   if (event.target.classList?.contains('shortcut-input')) return;
   const typing = event.target.matches?.('input,textarea,[contenteditable]') || Boolean(event.target.closest?.('[contenteditable]'));
   const clipboardShortcut = (event.ctrlKey || event.metaKey) && !event.altKey;
-  if (!typing && clipboardShortcut && event.key.toLowerCase() === 'c' && selectedPath) { event.preventDefault(); setFileClipboard('copy', selectedPath); }
+  if (currentView === 'timeline' && currentTimelineValid && eventMatchesShortcut(event, settings.shortcuts.timelineNewEvent)) { event.preventDefault(); timelineView.addEvent(); }
+  else if (currentView === 'timeline' && currentTimelineValid && eventMatchesShortcut(event, settings.shortcuts.timelineNewTrack)) { event.preventDefault(); timelineView.addTrack(); }
+  else if (currentView === 'timeline' && currentTimelineValid && eventMatchesShortcut(event, settings.shortcuts.timelineNewGroup)) { event.preventDefault(); timelineView.addTrackGroup(); }
+  else if (!typing && clipboardShortcut && event.key.toLowerCase() === 'c' && selectedPath) { event.preventDefault(); setFileClipboard('copy', selectedPath); }
   else if (!typing && clipboardShortcut && event.key.toLowerCase() === 'x' && selectedPath) { event.preventDefault(); setFileClipboard('cut', selectedPath); }
   else if (!typing && clipboardShortcut && event.key.toLowerCase() === 'v' && fileClipboard) { event.preventDefault(); pasteFileClipboard(); }
   else if (eventMatchesShortcut(event, settings.shortcuts.save)) { event.preventDefault(); const pane = activeSecondaryPane(); pane ? pane.save() : saveCurrent(); }

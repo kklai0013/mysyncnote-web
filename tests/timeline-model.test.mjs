@@ -52,6 +52,33 @@ test('較新版本不會被舊版程式正規化覆寫', () => {
   assert.throws(() => normalizeTimeline({ format: 'mysyncnote-timeline', version: 2 }), /較新的第 2 版/);
 });
 
+test('軌道資料夾會保留成員關係，遺失的資料夾會安全解除', () => {
+  const data = normalizeTimeline({
+    ...createEmptyTimeline('版本管理'),
+    trackGroups: [{ id: 'versions', name: '版本', collapsed: true, order: 0 }],
+    tracks: [
+      { id: 'track-a', name: '版本 A', color: '#78dba0', groupId: 'versions', order: 0 },
+      { id: 'track-b', name: '版本 B', color: '#7fb5ff', groupId: 'missing', order: 1000 }
+    ]
+  });
+  assert.equal(data.trackGroups[0].collapsed, true);
+  assert.equal(data.tracks.find(track => track.id === 'track-a').groupId, 'versions');
+  assert.equal(data.tracks.find(track => track.id === 'track-b').groupId, null);
+});
+
+test('事件片段會正規化開始位置與長度，並可從舊數字時間推導', () => {
+  const data = base();
+  data.events = [
+    event('a', { time: { kind: 'exact', start: '8', end: '14', precision: 'exact', momentId: '', anchorId: '', offset: 0, unit: 'day' } }),
+    event('b', { time: { kind: 'exact', start: '', end: '', precision: 'exact', momentId: '', anchorId: '', offset: 0, unit: 'day', position: -3, duration: 0 } })
+  ];
+  const normalized = normalizeTimeline(data);
+  assert.equal(normalized.events[0].time.position, 8);
+  assert.equal(normalized.events[0].time.duration, 6);
+  assert.equal(normalized.events[1].time.position, 0);
+  assert.equal(normalized.events[1].time.duration, 1);
+});
+
 test('相對時間可連續解析，並能偵測循環', () => {
   const data = base();
   data.events = [
