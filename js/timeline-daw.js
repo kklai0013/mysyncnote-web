@@ -693,7 +693,6 @@ export class TimelineView {
         control.value = options.fallback;
         apply(options.fallback);
       }
-      this.data = normalizeTimeline(this.data, this.data.title);
       this.pushHistory(before);
       before = '';
       if (options.renderOnBlur) this.render();
@@ -1281,7 +1280,6 @@ export class TimelineView {
       block.contentEditable = 'false';
       block.draggable = true;
       block.classList.remove('editing');
-      this.data = normalizeTimeline(this.data, this.data.title);
       this.pushHistory(before);
       before = '';
     });
