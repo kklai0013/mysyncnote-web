@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { moveTimelineEventsModel, reorderTimelineItemsModel, snapMeasure, TimelineView } from '../js/timeline-daw.js';
+import {
+  eventDropPosition,
+  moveTimelineEventsModel,
+  reorderTimelineItemsModel,
+  snapMeasure,
+  TimelineView
+} from '../js/timeline-daw.js';
 
 function clip(id, trackId, position, duration = 2) {
   return { id, title: id, trackIds: [trackId], time: { position, duration } };
@@ -10,6 +16,16 @@ test('事件位置吸附到整數小節', () => {
   assert.equal(snapMeasure(1.49), 1);
   assert.equal(snapMeasure(1.5), 2);
   assert.equal(snapMeasure(-10), 0);
+});
+
+test('拖曳吸附依卡片左緣而不是滑鼠落點', () => {
+  const unitWidth = 50;
+  const laneLeft = 100;
+  const pointerX = 430;
+  const grabbedTwentyPixelsFromCardLeft = 20;
+  assert.equal(eventDropPosition(pointerX, laneLeft, grabbedTwentyPixelsFromCardLeft, unitWidth), 6);
+  assert.equal(eventDropPosition(pointerX, laneLeft, 0, unitWidth), 7);
+  assert.equal(eventDropPosition(425, laneLeft, 25, unitWidth), 6);
 });
 
 test('多事件拖曳會保留相對小節與軌道距離', () => {

@@ -23,6 +23,10 @@ export function snapMeasure(value) {
   return Math.max(0, Math.round(finite(value)));
 }
 
+export function eventDropPosition(pointerX, laneLeft, grabOffset, unitWidth) {
+  return snapMeasure((finite(pointerX) - finite(laneLeft) - finite(grabOffset)) / Math.max(1, finite(unitWidth, 1)));
+}
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
@@ -225,6 +229,7 @@ export class TimelineView {
     this.pendingFocus = null;
     this.dragPayload = null;
     this.suppressLaneClick = false;
+    this.suppressEventClickUntil = 0;
     this.bind();
   }
 
@@ -1108,23 +1113,16 @@ export class TimelineView {
     card.style.width = `${eventDuration(event) * unitWidth}px`;
     card.style.height = `${cardHeight}px`;
     card.style.setProperty('--track-color', track?.color || COLORS[0]);
-    card.draggable = true;
-    card.ondragstart = dragEvent => {
-      if (dragEvent.target.closest('[contenteditable="true"],input:not([readonly]),textarea,select,button,.timeline-clip-resize')) {
-        dragEvent.preventDefault();
+    card.onclick = clickEvent => {
+      if (Date.now() < this.suppressEventClickUntil) {
+        clickEvent.preventDefault();
         return;
       }
-      this.startEventDrag(dragEvent, event);
-    };
-    card.ondragend = () => {
-      this.dragPayload = null;
-      this.clearDropPreview();
-    };
-    card.onclick = clickEvent => {
       const control = clickEvent.target.closest('input,textarea,select,button');
       if (control && !isLockedTextControl(clickEvent.target)) return;
       this.selectEvent(event.id, isAdditive(clickEvent));
     };
+    card.onpointerdown = pointerEvent => this.startEventPointerDrag(pointerEvent, event, card, unitWidth);
     card.ondragover = dragEvent => {
       if (dragEvent.dataTransfer.types.includes('text/mysyncnote-path')) {
         dragEvent.preventDefault();
@@ -1144,11 +1142,6 @@ export class TimelineView {
     const header = element('div', 'timeline-clip-header');
     const grip = element('span', 'timeline-clip-grip', '⠿');
     grip.title = '拖曳事件；Shift 點選可多選';
-    grip.draggable = true;
-    grip.ondragstart = dragEvent => {
-      dragEvent.stopPropagation();
-      this.startEventDrag(dragEvent, event);
-    };
     const title = input(event.title);
     title.className = 'timeline-clip-title';
     title.dataset.eventTitle = event.id;
@@ -1157,8 +1150,7 @@ export class TimelineView {
       selectOnFocus: this.pendingFocus?.kind === 'event' && this.pendingFocus.id === event.id,
       doubleClickEdit: true,
       selectOnEdit: true,
-      editTitle: '雙擊編輯事件標題',
-      onLockedDrag: dragEvent => this.startEventDrag(dragEvent, event)
+      editTitle: '雙擊編輯事件標題'
     });
     const expand = button(event.expanded ? '↥' : '↕', event.expanded ? '恢復展開前的軌道高度' : '依內容展開整條軌道');
     expand.className = 'timeline-clip-expand';
@@ -1235,12 +1227,77 @@ export class TimelineView {
     dragEvent.dataTransfer.effectAllowed = 'move';
   }
 
-  startEventDrag(dragEvent, event) {
-    if (!this.selectedEventIds.has(event.id)) this.selectEvent(event.id, false);
-    const payload = { anchorId: event.id, eventIds: [...this.selectedEventIds] };
-    this.dragPayload = payload;
-    dragEvent.dataTransfer.setData(EVENT_MIME, JSON.stringify(payload));
-    dragEvent.dataTransfer.effectAllowed = 'move';
+  startEventPointerDrag(pointerEvent, event, card, unitWidth) {
+    if (pointerEvent.button !== 0) return;
+    if (card.querySelector('[contenteditable="true"],input.editing,textarea.editing')) return;
+    const editingControl = pointerEvent.target.closest(
+      '[contenteditable="true"],input:not([readonly]),textarea,select,button,.timeline-clip-resize'
+    );
+    if (editingControl) return;
+    const startX = pointerEvent.clientX;
+    const startY = pointerEvent.clientY;
+    const grabOffset = startX - card.getBoundingClientRect().left;
+    const pointerId = pointerEvent.pointerId;
+    const additive = isAdditive(pointerEvent);
+    let active = false;
+    let payload = null;
+    let target = null;
+    card.setPointerCapture?.(pointerId);
+
+    const update = moveEvent => {
+      const distance = Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY);
+      if (!active && distance < 4) return;
+      if (!active) {
+        active = true;
+        if (!this.selectedEventIds.has(event.id)) this.selectEvent(event.id, additive);
+        payload = { anchorId: event.id, eventIds: [...this.selectedEventIds] };
+        this.dragPayload = payload;
+        card.classList.add('pointer-dragging');
+        document.getSelection?.()?.removeAllRanges?.();
+      }
+      moveEvent.preventDefault();
+      const pointed = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY);
+      const lane = pointed?.closest?.('.timeline-daw-lane');
+      if (!lane) {
+        target = null;
+        this.clearDropPreview();
+        return;
+      }
+      const trackId = lane.closest('.timeline-daw-track')?.dataset.trackId;
+      if (!trackId) return;
+      const laneRect = lane.getBoundingClientRect();
+      const position = eventDropPosition(moveEvent.clientX, laneRect.left, grabOffset, unitWidth);
+      target = { trackId, position };
+      this.showDropPreview(payload, trackId, position, unitWidth);
+    };
+
+    const finish = endEvent => {
+      update(endEvent);
+      card.removeEventListener('pointermove', update);
+      card.removeEventListener('pointerup', finish);
+      card.removeEventListener('pointercancel', cancel);
+      card.releasePointerCapture?.(pointerId);
+      card.classList.remove('pointer-dragging');
+      const dropTarget = target;
+      const dropPayload = payload;
+      this.dragPayload = null;
+      this.clearDropPreview();
+      if (active) this.suppressEventClickUntil = Date.now() + 250;
+      if (!active || !dropTarget || !dropPayload) return;
+      endEvent.preventDefault();
+      this.moveEvents(dropPayload, dropTarget.trackId, dropTarget.position);
+    };
+    const cancel = () => {
+      card.removeEventListener('pointermove', update);
+      card.removeEventListener('pointerup', finish);
+      card.removeEventListener('pointercancel', cancel);
+      card.classList.remove('pointer-dragging');
+      this.dragPayload = null;
+      this.clearDropPreview();
+    };
+    card.addEventListener('pointermove', update);
+    card.addEventListener('pointerup', finish);
+    card.addEventListener('pointercancel', cancel);
   }
 
   makeMarkdownBlock(event) {
@@ -1257,7 +1314,6 @@ export class TimelineView {
     });
     live.setValue(event.description);
     block.contentEditable = 'false';
-    block.draggable = true;
     block.addEventListener('pointerdown', pointerEvent => {
       if (block.isContentEditable) pointerEvent.stopPropagation();
     });
@@ -1270,7 +1326,6 @@ export class TimelineView {
       if (block.isContentEditable) return;
       before = this.snapshot();
       block.contentEditable = 'true';
-      block.draggable = false;
       block.classList.add('editing');
       live.focus();
       live.setSelectionRange(live.value().length);
@@ -1278,7 +1333,6 @@ export class TimelineView {
     block.addEventListener('blur', () => {
       if (!block.isContentEditable) return;
       block.contentEditable = 'false';
-      block.draggable = true;
       block.classList.remove('editing');
       this.pushHistory(before);
       before = '';
@@ -1288,14 +1342,6 @@ export class TimelineView {
         keyEvent.preventDefault();
         block.blur();
       }
-    });
-    block.addEventListener('dragstart', dragEvent => {
-      dragEvent.stopPropagation();
-      if (block.isContentEditable) {
-        dragEvent.preventDefault();
-        return;
-      }
-      this.startEventDrag(dragEvent, event);
     });
     return block;
   }
