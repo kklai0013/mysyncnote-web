@@ -398,7 +398,10 @@ export class TimelineView {
 
   compactTrackHeights() {
     this.transact('全部軌道收至最小高度', data => {
-      for (const track of data.tracks) track.height = 84;
+      for (const track of data.tracks) {
+        track.height = 84;
+        delete track.heightBeforeExpand;
+      }
       for (const event of data.events) event.expanded = false;
     });
   }
@@ -1100,7 +1103,7 @@ export class TimelineView {
 
   makeEventCard(event, track, unitWidth) {
     const cardHeight = Math.max(66, finite(track.height, DEFAULT_TRACK_HEIGHT) - 18);
-    const card = element('article', `timeline-daw-event${this.selectedEventIds.has(event.id) ? ' selected' : ''}`);
+    const card = element('article', `timeline-daw-event${this.selectedEventIds.has(event.id) ? ' selected' : ''}${event.expanded ? ' expanded' : ''}`);
     card.dataset.eventId = event.id;
     card.style.left = `${eventPosition(event) * unitWidth}px`;
     card.style.width = `${eventDuration(event) * unitWidth}px`;
@@ -1158,13 +1161,19 @@ export class TimelineView {
       editTitle: '雙擊編輯事件標題',
       onLockedDrag: dragEvent => this.startEventDrag(dragEvent, event)
     });
+    const expand = button(event.expanded ? '↥' : '↕', event.expanded ? '恢復展開前的軌道高度' : '依內容展開整條軌道');
+    expand.className = 'timeline-clip-expand';
+    expand.onclick = clickEvent => {
+      clickEvent.stopPropagation();
+      this.toggleEventExpanded(event.id);
+    };
     const remove = button('×', '刪除事件');
     remove.className = 'timeline-clip-delete';
     remove.onclick = clickEvent => {
       clickEvent.stopPropagation();
       this.deleteEvent(event.id);
     };
-    header.append(grip, title, remove);
+    header.append(grip, title, expand, remove);
 
     const description = this.makeMarkdownBlock(event);
 
@@ -1291,6 +1300,36 @@ export class TimelineView {
       this.startEventDrag(dragEvent, event);
     });
     return block;
+  }
+
+  toggleEventExpanded(eventId) {
+    const targetEvent = this.data.events.find(event => event.id === eventId);
+    if (!targetEvent) return;
+    const trackId = targetEvent.trackIds[0];
+    const requiredHeights = new Map();
+    for (const event of this.data.events.filter(item => item.trackIds[0] === trackId)) {
+      const description = this.stage.querySelector(`.timeline-daw-event[data-event-id="${CSS.escape(event.id)}"] .timeline-clip-description`);
+      requiredHeights.set(event.id, clamp((description?.scrollHeight || 166) + 94, DEFAULT_TRACK_HEIGHT, 480));
+    }
+    this.transact('依內容調整軌道高度', data => {
+      const event = data.events.find(item => item.id === eventId);
+      const track = data.tracks.find(item => item.id === trackId);
+      if (!event || !track) return;
+      const wasExpanded = Boolean(event.expanded);
+      const hadExpandedEvent = data.events.some(item => item.trackIds[0] === trackId && item.expanded);
+      if (!wasExpanded && !hadExpandedEvent) track.heightBeforeExpand = finite(track.height, DEFAULT_TRACK_HEIGHT);
+      event.expanded = !wasExpanded;
+      const expandedEvents = data.events.filter(item => item.trackIds[0] === trackId && item.expanded);
+      if (!expandedEvents.length) {
+        track.height = clamp(finite(track.heightBeforeExpand, DEFAULT_TRACK_HEIGHT), 84, 480);
+        delete track.heightBeforeExpand;
+      } else {
+        track.height = Math.max(
+          finite(track.heightBeforeExpand, DEFAULT_TRACK_HEIGHT),
+          ...expandedEvents.map(item => requiredHeights.get(item.id) || 260)
+        );
+      }
+    });
   }
 
   startEventResize(pointerEvent, event, card, durationInput, unitWidth) {

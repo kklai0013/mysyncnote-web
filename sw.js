@@ -1,7 +1,7 @@
-const CACHE = 'mysyncnote-v26';
+const CACHE = 'mysyncnote-v27';
 const SHELL = [
-  './', './index.html', './styles.css?v=26', './manifest.webmanifest', './icon.svg',
-  './js/app.js?v=26', './js/storage.js?v=19', './js/markdown.js', './js/live-editor.js', './js/graph.js', './js/canvas.js?v=17', './js/timeline.js?v=24', './js/timeline-daw.js?v=26'
+  './', './index.html', './styles.css?v=27', './manifest.webmanifest', './icon.svg',
+  './js/app.js?v=27', './js/storage.js?v=19', './js/markdown.js', './js/live-editor.js', './js/graph.js', './js/canvas.js?v=17', './js/timeline.js?v=24', './js/timeline-daw.js?v=27'
 ];
 
 self.addEventListener('install', event => {
