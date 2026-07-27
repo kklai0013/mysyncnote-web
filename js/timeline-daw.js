@@ -1242,9 +1242,9 @@ export class TimelineView {
     let active = false;
     let payload = null;
     let target = null;
-    card.setPointerCapture?.(pointerId);
 
     const update = moveEvent => {
+      if (moveEvent.pointerId !== pointerId) return;
       const distance = Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY);
       if (!active && distance < 4) return;
       if (!active) {
@@ -1272,11 +1272,11 @@ export class TimelineView {
     };
 
     const finish = endEvent => {
+      if (endEvent.pointerId !== pointerId) return;
       update(endEvent);
-      card.removeEventListener('pointermove', update);
-      card.removeEventListener('pointerup', finish);
-      card.removeEventListener('pointercancel', cancel);
-      card.releasePointerCapture?.(pointerId);
+      window.removeEventListener('pointermove', update);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', cancel);
       card.classList.remove('pointer-dragging');
       const dropTarget = target;
       const dropPayload = payload;
@@ -1287,17 +1287,18 @@ export class TimelineView {
       endEvent.preventDefault();
       this.moveEvents(dropPayload, dropTarget.trackId, dropTarget.position);
     };
-    const cancel = () => {
-      card.removeEventListener('pointermove', update);
-      card.removeEventListener('pointerup', finish);
-      card.removeEventListener('pointercancel', cancel);
+    const cancel = cancelEvent => {
+      if (cancelEvent.pointerId !== pointerId) return;
+      window.removeEventListener('pointermove', update);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', cancel);
       card.classList.remove('pointer-dragging');
       this.dragPayload = null;
       this.clearDropPreview();
     };
-    card.addEventListener('pointermove', update);
-    card.addEventListener('pointerup', finish);
-    card.addEventListener('pointercancel', cancel);
+    window.addEventListener('pointermove', update);
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', cancel);
   }
 
   makeMarkdownBlock(event) {
