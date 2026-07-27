@@ -1,4 +1,5 @@
 import { createEmptyTimeline, normalizeTimeline, validateTimeline } from './timeline.js?v=21';
+import { LiveMarkdownEditor } from './live-editor.js';
 
 const COLORS = ['#78dba0', '#7fb5ff', '#d99cff', '#f4b86a', '#ff8d8d', '#69d4d0', '#c7d36f'];
 const MIN_DURATION = 1;
@@ -62,6 +63,11 @@ function stopControlEvents(control) {
 
 function isAdditive(event) {
   return Boolean(event.shiftKey || event.ctrlKey || event.metaKey);
+}
+
+function isLockedTextControl(target) {
+  const control = target.closest?.('[data-double-click-edit]');
+  return Boolean(control && (control.readOnly || control.contentEditable === 'false'));
 }
 
 function intersects(a, b) {
@@ -533,6 +539,10 @@ export class TimelineView {
       this.pushHistory(before);
       before = '';
       if (options.renderOnBlur) this.render();
+      if (options.doubleClickEdit) {
+        control.readOnly = true;
+        control.classList.remove('editing');
+      }
     });
     if (control.tagName === 'INPUT' && control.type === 'text') {
       control.addEventListener('keydown', event => {
@@ -542,7 +552,35 @@ export class TimelineView {
         }
       });
     }
-    stopControlEvents(control);
+    if (options.doubleClickEdit) {
+      control.readOnly = true;
+      control.dataset.doubleClickEdit = '';
+      control.title = options.editTitle || '雙擊編輯';
+      control.addEventListener('click', event => {
+        if (control.readOnly) return;
+        event.stopPropagation();
+      });
+      control.addEventListener('pointerdown', event => {
+        if (!control.readOnly) event.stopPropagation();
+      });
+      control.addEventListener('dblclick', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        control.readOnly = false;
+        control.classList.add('editing');
+        control.focus();
+        if (options.selectOnEdit) control.select?.();
+      });
+      control.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          control.blur();
+        }
+      });
+      control.addEventListener('dragstart', event => event.stopPropagation());
+    } else {
+      stopControlEvents(control);
+    }
   }
 
   filteredEvents() {
@@ -629,7 +667,7 @@ export class TimelineView {
     row.style.setProperty('--group-color', group.color || COLORS[0]);
     const label = element('div', 'timeline-track-folder-label');
     label.onclick = clickEvent => {
-      if (clickEvent.target.closest('button,input')) return;
+      if (clickEvent.target.closest('button') || (clickEvent.target.closest('input') && !isLockedTextControl(clickEvent.target))) return;
       if (!isAdditive(clickEvent)) this.selectedTrackIds.clear();
       for (const track of memberTracks) this.selectedTrackIds.add(track.id);
       this.selectedTrackId = memberTracks.at(-1)?.id || this.selectedTrackId;
@@ -646,7 +684,12 @@ export class TimelineView {
     const name = input(group.name);
     name.className = 'timeline-folder-name';
     name.dataset.groupName = group.id;
-    this.bindDraft(name, value => { group.name = value; }, { fallback: '未命名資料夾' });
+    this.bindDraft(name, value => { group.name = value; }, {
+      fallback: '未命名資料夾',
+      doubleClickEdit: true,
+      selectOnEdit: true,
+      editTitle: '雙擊重新命名資料夾'
+    });
     nameWrap.append(name, element('small', '', `${memberTracks.length} 條軌道`));
     const remove = button('×', '解除資料夾（保留裡面的軌道）');
     remove.className = 'timeline-folder-remove';
@@ -693,7 +736,7 @@ export class TimelineView {
     row.style.height = `${height}px`;
     const label = element('div', 'timeline-daw-track-label');
     label.onclick = clickEvent => {
-      if (clickEvent.target.closest('input,button')) return;
+      if (clickEvent.target.closest('button') || (clickEvent.target.closest('input') && !isLockedTextControl(clickEvent.target))) return;
       this.selectTrack(track.id, isAdditive(clickEvent));
     };
     label.draggable = true;
@@ -717,7 +760,10 @@ export class TimelineView {
     name.className = 'timeline-track-name';
     this.bindDraft(name, value => { track.name = value; }, {
       fallback: '未命名軌道',
-      selectOnFocus: this.pendingFocus?.kind === 'track' && this.pendingFocus.id === track.id
+      selectOnFocus: this.pendingFocus?.kind === 'track' && this.pendingFocus.id === track.id,
+      doubleClickEdit: true,
+      selectOnEdit: true,
+      editTitle: '雙擊重新命名軌道'
     });
     const count = element('small', '', String(this.data.events.filter(event => event.trackIds[0] === track.id).length));
     const remove = button('×', '刪除軌道');
@@ -809,7 +855,8 @@ export class TimelineView {
     card.style.height = `${cardHeight}px`;
     card.style.setProperty('--track-color', track?.color || COLORS[0]);
     card.onclick = clickEvent => {
-      if (clickEvent.target.closest('input,textarea,select,button')) return;
+      const control = clickEvent.target.closest('input,textarea,select,button');
+      if (control && !isLockedTextControl(clickEvent.target)) return;
       this.selectEvent(event.id, isAdditive(clickEvent));
     };
     card.ondragover = dragEvent => {
@@ -849,7 +896,10 @@ export class TimelineView {
     title.dataset.eventTitle = event.id;
     this.bindDraft(title, value => { event.title = value; }, {
       fallback: '未命名事件',
-      selectOnFocus: this.pendingFocus?.kind === 'event' && this.pendingFocus.id === event.id
+      selectOnFocus: this.pendingFocus?.kind === 'event' && this.pendingFocus.id === event.id,
+      doubleClickEdit: true,
+      selectOnEdit: true,
+      editTitle: '雙擊編輯事件標題'
     });
     const expand = button(event.expanded ? '↥' : '↕', event.expanded ? '恢復一般高度' : '展開事件內容');
     expand.className = 'timeline-clip-expand';
@@ -865,10 +915,7 @@ export class TimelineView {
     };
     header.append(grip, title, expand, remove);
 
-    const description = element('textarea', 'timeline-clip-description');
-    description.value = event.description;
-    description.placeholder = '直接輸入事件內容…';
-    this.bindDraft(description, value => { event.description = value; });
+    const description = this.makeMarkdownBlock(event);
 
     const footer = element('div', 'timeline-clip-footer');
     const positionLabel = element('label', '', '小節');
@@ -919,6 +966,54 @@ export class TimelineView {
     resize.onpointerdown = pointerEvent => this.startEventResize(pointerEvent, event, card, duration, unitWidth);
     card.append(header, description, footer, resize);
     return card;
+  }
+
+  makeMarkdownBlock(event) {
+    const block = element('div', 'timeline-clip-description timeline-clip-markdown live-editor');
+    block.dataset.doubleClickEdit = '';
+    block.dataset.placeholder = '雙擊輸入事件內容…';
+    block.title = 'Markdown 混合顯示；雙擊編輯';
+    let before = '';
+    const live = new LiveMarkdownEditor(block, {
+      onChange: source => {
+        event.description = source;
+        this.onChange();
+      }
+    });
+    live.setValue(event.description);
+    block.contentEditable = 'false';
+    block.addEventListener('pointerdown', pointerEvent => {
+      if (block.isContentEditable) pointerEvent.stopPropagation();
+    });
+    block.addEventListener('click', clickEvent => {
+      if (block.isContentEditable) clickEvent.stopPropagation();
+    });
+    block.addEventListener('dblclick', doubleClickEvent => {
+      doubleClickEvent.preventDefault();
+      doubleClickEvent.stopPropagation();
+      if (block.isContentEditable) return;
+      before = this.snapshot();
+      block.contentEditable = 'true';
+      block.classList.add('editing');
+      live.focus();
+      live.setSelectionRange(live.value().length);
+    });
+    block.addEventListener('blur', () => {
+      if (!block.isContentEditable) return;
+      block.contentEditable = 'false';
+      block.classList.remove('editing');
+      this.data = normalizeTimeline(this.data, this.data.title);
+      this.pushHistory(before);
+      before = '';
+    });
+    block.addEventListener('keydown', keyEvent => {
+      if (keyEvent.key === 'Escape') {
+        keyEvent.preventDefault();
+        block.blur();
+      }
+    });
+    block.addEventListener('dragstart', dragEvent => dragEvent.stopPropagation());
+    return block;
   }
 
   toggleEventExpanded(eventId) {

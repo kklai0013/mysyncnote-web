@@ -895,6 +895,34 @@ button:disabled { opacity: .38; cursor: not-allowed; }
   user-select: text;
 }
 
+.timeline-clip-markdown.live-editor {
+  display: block;
+  cursor: default;
+  caret-color: transparent;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+}
+
+.timeline-clip-markdown.live-editor[contenteditable="true"] {
+  cursor: text;
+  caret-color: var(--text);
+  border-color: #789985;
+  background: #171a1f;
+}
+
+.timeline-clip-markdown.live-editor:empty::before {
+  content: attr(data-placeholder);
+  color: #777f88;
+  pointer-events: none;
+}
+
+[data-double-click-edit][readonly] {
+  cursor: default;
+}
+
+[data-double-click-edit].editing {
+  cursor: text;
+}
+
 .timeline-clip-footer {
   height: 31px;
   min-height: 31px;

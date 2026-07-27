@@ -4,7 +4,7 @@ import { GraphView } from './graph.js';
 import { CanvasView } from './canvas.js?v=17';
 import { LiveMarkdownEditor } from './live-editor.js';
 import { createEmptyTimeline } from './timeline.js?v=21';
-import { TimelineView } from './timeline-daw.js?v=21';
+import { TimelineView } from './timeline-daw.js?v=22';
 
 const $ = id => document.getElementById(id);
 const app = $('app');
