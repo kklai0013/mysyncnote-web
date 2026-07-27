@@ -232,6 +232,7 @@ export class TimelineView {
     this.root.querySelector('#timelineAddEvent').onclick = () => this.addEvent();
     this.root.querySelector('#timelineAddTrack').onclick = () => this.addTrack();
     this.root.querySelector('#timelineAddGroup').onclick = () => this.addTrackGroup();
+    this.root.querySelector('#timelineCompactTracks').onclick = () => this.compactTrackHeights();
     this.root.querySelector('#timelineUndo').onclick = () => this.undo();
     this.root.querySelector('#timelineRedo').onclick = () => this.redo();
     this.root.querySelector('#timelineZoomOut').onclick = () => this.setZoom(this.zoom / 1.18);
@@ -393,6 +394,13 @@ export class TimelineView {
     this.zoom = clamp(finite(value, 1), .45, 2.4);
     this.persistView();
     this.render();
+  }
+
+  compactTrackHeights() {
+    this.transact('全部軌道收至最小高度', data => {
+      for (const track of data.tracks) track.height = 84;
+      for (const event of data.events) event.expanded = false;
+    });
   }
 
   selectionLabel() {
@@ -1091,10 +1099,8 @@ export class TimelineView {
   }
 
   makeEventCard(event, track, unitWidth) {
-    const cardHeight = event.expanded
-      ? Math.max(66, finite(track.height, DEFAULT_TRACK_HEIGHT) - 18)
-      : Math.min(132, Math.max(66, finite(track.height, DEFAULT_TRACK_HEIGHT) - 18));
-    const card = element('article', `timeline-daw-event${this.selectedEventIds.has(event.id) ? ' selected' : ''}${event.expanded ? ' expanded' : ''}`);
+    const cardHeight = Math.max(66, finite(track.height, DEFAULT_TRACK_HEIGHT) - 18);
+    const card = element('article', `timeline-daw-event${this.selectedEventIds.has(event.id) ? ' selected' : ''}`);
     card.dataset.eventId = event.id;
     card.style.left = `${eventPosition(event) * unitWidth}px`;
     card.style.width = `${eventDuration(event) * unitWidth}px`;
@@ -1152,19 +1158,13 @@ export class TimelineView {
       editTitle: '雙擊編輯事件標題',
       onLockedDrag: dragEvent => this.startEventDrag(dragEvent, event)
     });
-    const expand = button(event.expanded ? '↥' : '↕', event.expanded ? '恢復一般高度' : '展開事件內容');
-    expand.className = 'timeline-clip-expand';
-    expand.onclick = clickEvent => {
-      clickEvent.stopPropagation();
-      this.toggleEventExpanded(event.id);
-    };
     const remove = button('×', '刪除事件');
     remove.className = 'timeline-clip-delete';
     remove.onclick = clickEvent => {
       clickEvent.stopPropagation();
       this.deleteEvent(event.id);
     };
-    header.append(grip, title, expand, remove);
+    header.append(grip, title, remove);
 
     const description = this.makeMarkdownBlock(event);
 
@@ -1291,20 +1291,6 @@ export class TimelineView {
       this.startEventDrag(dragEvent, event);
     });
     return block;
-  }
-
-  toggleEventExpanded(eventId) {
-    const description = this.stage.querySelector(`.timeline-daw-event[data-event-id="${CSS.escape(eventId)}"] .timeline-clip-description`);
-    const requiredHeight = clamp((description?.scrollHeight || 150) + 94, 180, 480);
-    this.transact('展開事件', data => {
-      const event = data.events.find(item => item.id === eventId);
-      if (!event) return;
-      event.expanded = !event.expanded;
-      if (event.expanded) {
-        const track = data.tracks.find(item => item.id === event.trackIds[0]);
-        if (track) track.height = Math.max(finite(track.height, DEFAULT_TRACK_HEIGHT), requiredHeight);
-      }
-    });
   }
 
   startEventResize(pointerEvent, event, card, durationInput, unitWidth) {
