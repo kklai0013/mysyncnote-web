@@ -9,11 +9,20 @@ import { TimelineView } from './timeline-daw.js?v=19';
 const $ = id => document.getElementById(id);
 const app = $('app');
 const LAYOUT_VERSION = 3;
-const DEFAULT_SHORTCUTS = { save: 'Ctrl+S', close: 'Ctrl+W', command: 'Ctrl+P', search: 'Ctrl+K', newNote: 'Ctrl+N', graph: 'Ctrl+G', rename: 'F2', toggleLeft: 'Ctrl+B', split: 'Ctrl+\\', timelineNewEvent: 'Ctrl+Enter', timelineNewTrack: 'Ctrl+Shift+Enter', timelineNewGroup: 'Ctrl+Alt+Enter' };
+const DEFAULT_SHORTCUTS = { save: 'Ctrl+S', close: 'Ctrl+W', command: 'Ctrl+P', search: 'Ctrl+K', newNote: 'Ctrl+N', graph: 'Ctrl+G', rename: 'F2', toggleLeft: 'Ctrl+B', split: 'Ctrl+\\', timelineNewEvent: 'E', timelineNewTrack: 'T', timelineNewGroup: 'G' };
+const LEGACY_TIMELINE_SHORTCUTS = { timelineNewEvent: 'Ctrl+Enter', timelineNewTrack: 'Ctrl+Shift+Enter', timelineNewGroup: 'Ctrl+Alt+Enter' };
 const SHORTCUT_LABELS = { save: '立即儲存', close: '關閉目前筆記或 Canvas', command: '命令面板', search: '搜尋筆記庫', newNote: '新增筆記', graph: '顯示／關閉關聯圖譜', rename: '重新命名選取項目', toggleLeft: '顯示／收起左側欄', split: '將目前筆記分割到新窗格', timelineNewEvent: '時間線：新增事件', timelineNewTrack: '時間線：新增軌道', timelineNewGroup: '時間線：新增軌道資料夾' };
+function migrateShortcutDefaults(shortcuts = {}) {
+  const migrated = { ...DEFAULT_SHORTCUTS, ...shortcuts };
+  for (const [key, oldValue] of Object.entries(LEGACY_TIMELINE_SHORTCUTS)) {
+    if (shortcuts[key] == null || shortcuts[key] === oldValue) migrated[key] = DEFAULT_SHORTCUTS[key];
+  }
+  return migrated;
+}
 const settings = Object.assign({ attachmentFolder: 'attachments', trashMode: 'trash', updateLinks: true, autoSave: true, settingsFileName: 'mysyncnote-settings.json', shortcuts: { ...DEFAULT_SHORTCUTS } }, JSON.parse(localStorage.getItem('mysyncnote-preferences') || '{}'));
-settings.shortcuts = { ...DEFAULT_SHORTCUTS, ...(settings.shortcuts || {}) };
+settings.shortcuts = migrateShortcutDefaults(settings.shortcuts);
 for (const key of Object.keys(DEFAULT_SHORTCUTS)) if (typeof settings.shortcuts[key] !== 'string') settings.shortcuts[key] = '';
+localStorage.setItem('mysyncnote-preferences', JSON.stringify(settings));
 let vault = null;
 let rememberedHandle = null;
 let settingsFolderHandle = null;
@@ -93,7 +102,7 @@ async function loadSettingsFile(handle) {
     const name = safeName(settings.settingsFileName || 'mysyncnote-settings.json', '.json');
     const fileHandle = await handle.getFileHandle(name);
     const incoming = JSON.parse(await (await fileHandle.getFile()).text());
-    Object.assign(settings, incoming, { shortcuts: { ...DEFAULT_SHORTCUTS, ...(incoming.shortcuts || {}) } });
+    Object.assign(settings, incoming, { shortcuts: migrateShortcutDefaults(incoming.shortcuts) });
     for (const key of Object.keys(DEFAULT_SHORTCUTS)) if (typeof settings.shortcuts[key] !== 'string') settings.shortcuts[key] = '';
     localStorage.setItem('mysyncnote-preferences', JSON.stringify(settings));
     settingsFolderHandle = handle;
@@ -1981,11 +1990,11 @@ addEventListener('keydown', event => {
     return;
   }
   if (event.target.classList?.contains('shortcut-input')) return;
-  const typing = event.target.matches?.('input,textarea,[contenteditable]') || Boolean(event.target.closest?.('[contenteditable]'));
+  const typing = event.target.matches?.('input,textarea,select,[contenteditable]') || Boolean(event.target.closest?.('[contenteditable]'));
   const clipboardShortcut = (event.ctrlKey || event.metaKey) && !event.altKey;
-  if (currentView === 'timeline' && currentTimelineValid && eventMatchesShortcut(event, settings.shortcuts.timelineNewEvent)) { event.preventDefault(); timelineView.addEvent(); }
-  else if (currentView === 'timeline' && currentTimelineValid && eventMatchesShortcut(event, settings.shortcuts.timelineNewTrack)) { event.preventDefault(); timelineView.addTrack(); }
-  else if (currentView === 'timeline' && currentTimelineValid && eventMatchesShortcut(event, settings.shortcuts.timelineNewGroup)) { event.preventDefault(); timelineView.addTrackGroup(); }
+  if (!typing && currentView === 'timeline' && currentTimelineValid && eventMatchesShortcut(event, settings.shortcuts.timelineNewEvent)) { event.preventDefault(); timelineView.addEvent(); }
+  else if (!typing && currentView === 'timeline' && currentTimelineValid && eventMatchesShortcut(event, settings.shortcuts.timelineNewTrack)) { event.preventDefault(); timelineView.addTrack(); }
+  else if (!typing && currentView === 'timeline' && currentTimelineValid && eventMatchesShortcut(event, settings.shortcuts.timelineNewGroup)) { event.preventDefault(); timelineView.addTrackGroup(); }
   else if (!typing && clipboardShortcut && event.key.toLowerCase() === 'c' && selectedPath) { event.preventDefault(); setFileClipboard('copy', selectedPath); }
   else if (!typing && clipboardShortcut && event.key.toLowerCase() === 'x' && selectedPath) { event.preventDefault(); setFileClipboard('cut', selectedPath); }
   else if (!typing && clipboardShortcut && event.key.toLowerCase() === 'v' && fileClipboard) { event.preventDefault(); pasteFileClipboard(); }
