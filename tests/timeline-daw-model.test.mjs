@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { moveTimelineEventsModel, snapMeasure } from '../js/timeline-daw.js';
+import { moveTimelineEventsModel, reorderTimelineItemsModel, snapMeasure } from '../js/timeline-daw.js';
 
 function clip(id, trackId, position, duration = 2) {
   return { id, title: id, trackIds: [trackId], time: { position, duration } };
@@ -42,4 +42,45 @@ test('多事件拖到時間線左側不會產生負小節', () => {
   moveTimelineEventsModel(data, ['anchor', 'earlier'], 'anchor', 'track-a', 0, ['track-a']);
   assert.equal(data.events.find(event => event.id === 'earlier').time.position, 0);
   assert.equal(data.events.find(event => event.id === 'anchor').time.position, 3);
+});
+
+test('軌道與資料夾可在同一層混合排序', () => {
+  const data = {
+    trackGroups: [{ id: 'folder', parentId: null, order: 1000 }],
+    tracks: [
+      { id: 'track-a', groupId: null, order: 0 },
+      { id: 'track-b', groupId: null, order: 2000 }
+    ]
+  };
+  assert.equal(reorderTimelineItemsModel(data, { trackIds: ['track-b'] }, 'group', 'folder', 'before'), true);
+  const trackA = data.tracks.find(track => track.id === 'track-a');
+  const trackB = data.tracks.find(track => track.id === 'track-b');
+  assert.ok(trackA.order < trackB.order);
+  assert.ok(trackB.order < data.trackGroups[0].order);
+});
+
+test('多選軌道移入資料夾時保持整組順序', () => {
+  const data = {
+    trackGroups: [{ id: 'folder', parentId: null, order: 3000 }],
+    tracks: [
+      { id: 'a', groupId: null, order: 0 },
+      { id: 'b', groupId: null, order: 1000 },
+      { id: 'c', groupId: null, order: 2000 }
+    ]
+  };
+  assert.equal(reorderTimelineItemsModel(data, { trackIds: ['a', 'b'] }, 'group', 'folder', 'inside'), true);
+  const inside = data.tracks.filter(track => track.groupId === 'folder').sort((a, b) => a.order - b.order);
+  assert.deepEqual(inside.map(track => track.id), ['a', 'b']);
+});
+
+test('資料夾不能移進自己的後代', () => {
+  const data = {
+    trackGroups: [
+      { id: 'parent', parentId: null, order: 0 },
+      { id: 'child', parentId: 'parent', order: 0 }
+    ],
+    tracks: []
+  };
+  assert.equal(reorderTimelineItemsModel(data, { groupId: 'parent' }, 'group', 'child', 'inside'), false);
+  assert.equal(data.trackGroups.find(group => group.id === 'parent').parentId, null);
 });

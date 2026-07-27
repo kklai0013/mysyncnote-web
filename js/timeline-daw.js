@@ -126,6 +126,81 @@ export function moveTimelineEventsModel(data, eventIds, anchorId, targetTrackId,
   return true;
 }
 
+function timelineContainerItems(data, parentId) {
+  const normalizedParent = parentId || null;
+  return [
+    ...data.trackGroups
+      .filter(group => (group.parentId || null) === normalizedParent)
+      .map(group => ({ kind: 'group', id: group.id, order: finite(group.order) })),
+    ...data.tracks
+      .filter(track => (track.groupId || null) === normalizedParent)
+      .map(track => ({ kind: 'track', id: track.id, order: finite(track.order) }))
+  ].sort((a, b) => a.order - b.order || a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
+}
+
+function timelineGroupContains(data, ancestorId, candidateId) {
+  let currentId = candidateId || null;
+  const seen = new Set();
+  while (currentId && !seen.has(currentId)) {
+    if (currentId === ancestorId) return true;
+    seen.add(currentId);
+    currentId = data.trackGroups.find(group => group.id === currentId)?.parentId || null;
+  }
+  return false;
+}
+
+/**
+ * Reorders tracks and folders in one shared list. `inside` is only valid for
+ * a folder target; `before` and `after` use the target item's parent.
+ */
+export function reorderTimelineItemsModel(data, moving, targetKind, targetId, position) {
+  const target = targetKind === 'group'
+    ? data.trackGroups.find(group => group.id === targetId)
+    : data.tracks.find(track => track.id === targetId);
+  if (!target) return false;
+  const movingTrackIds = new Set(moving.trackIds || []);
+  const movingGroup = moving.groupId ? data.trackGroups.find(group => group.id === moving.groupId) : null;
+  if (!movingTrackIds.size && !movingGroup) return false;
+  if (targetKind === 'track' && movingTrackIds.has(targetId)) return false;
+  if (movingGroup?.id === targetId) return false;
+  const parentId = position === 'inside' && targetKind === 'group'
+    ? target.id
+    : targetKind === 'group'
+      ? target.parentId || null
+      : target.groupId || null;
+  if (movingGroup && timelineGroupContains(data, movingGroup.id, parentId)) return false;
+
+  const orderedMovingTracks = data.tracks
+    .filter(track => movingTrackIds.has(track.id))
+    .sort((a, b) => finite(a.order) - finite(b.order));
+  for (const track of orderedMovingTracks) track.groupId = parentId;
+  if (movingGroup) movingGroup.parentId = parentId;
+
+  const movingKeys = new Set([
+    ...orderedMovingTracks.map(track => `track:${track.id}`),
+    ...(movingGroup ? [`group:${movingGroup.id}`] : [])
+  ]);
+  const container = timelineContainerItems(data, parentId).filter(item => !movingKeys.has(`${item.kind}:${item.id}`));
+  const movingItems = [
+    ...(movingGroup ? [{ kind: 'group', id: movingGroup.id, order: finite(movingGroup.order) }] : []),
+    ...orderedMovingTracks.map(track => ({ kind: 'track', id: track.id, order: finite(track.order) }))
+  ].sort((a, b) => a.order - b.order || a.kind.localeCompare(b.kind));
+  let index = container.length;
+  if (position !== 'inside') {
+    const targetIndex = container.findIndex(item => item.kind === targetKind && item.id === targetId);
+    if (targetIndex < 0) return false;
+    index = targetIndex + (position === 'after' ? 1 : 0);
+  }
+  container.splice(index, 0, ...movingItems);
+  container.forEach((item, itemIndex) => {
+    const source = item.kind === 'group'
+      ? data.trackGroups.find(group => group.id === item.id)
+      : data.tracks.find(track => track.id === item.id);
+    if (source) source.order = itemIndex * 1000;
+  });
+  return true;
+}
+
 export class TimelineView {
   constructor(options) {
     this.root = options.root;
@@ -348,14 +423,18 @@ export class TimelineView {
   }
 
   displayedTracks() {
-    const groups = [...this.data.trackGroups].sort((a, b) => a.order - b.order);
-    const validGroups = new Set(groups.map(group => group.id));
-    const result = this.data.tracks.filter(track => !validGroups.has(track.groupId)).sort((a, b) => a.order - b.order);
-    const appendGroup = group => {
-      for (const child of groups.filter(candidate => candidate.parentId === group.id)) appendGroup(child);
-      result.push(...this.data.tracks.filter(track => track.groupId === group.id).sort((a, b) => a.order - b.order));
+    const result = [];
+    const appendContainer = parentId => {
+      for (const item of timelineContainerItems(this.data, parentId)) {
+        if (item.kind === 'track') {
+          const track = this.data.tracks.find(candidate => candidate.id === item.id);
+          if (track) result.push(track);
+        } else {
+          appendContainer(item.id);
+        }
+      }
     };
-    for (const group of groups.filter(group => !group.parentId)) appendGroup(group);
+    appendContainer(null);
     return result;
   }
 
@@ -478,7 +557,7 @@ export class TimelineView {
         color: COLORS[data.tracks.length % COLORS.length],
         groupId: currentGroup,
         height: DEFAULT_TRACK_HEIGHT,
-        order: nextOrder(data.tracks)
+        order: nextOrder(timelineContainerItems(data, currentGroup))
       });
     }, { kind: 'track', id: trackId });
   }
@@ -503,7 +582,7 @@ export class TimelineView {
         color: COLORS[data.trackGroups.length % COLORS.length],
         parentId: data.trackGroups.some(group => group.id === parentId) ? parentId : null,
         collapsed: false,
-        order: nextOrder(data.trackGroups)
+        order: nextOrder(timelineContainerItems(data, parentId))
       });
       if (moveSelected) {
         for (const track of data.tracks) if (selectedIds.has(track.id)) track.groupId = groupId;
@@ -695,19 +774,20 @@ export class TimelineView {
     board.style.setProperty('--timeline-major', `${unitWidth * 4}px`);
     board.append(this.makeAxis(totalWidth, unitWidth));
 
-    const groups = [...this.data.trackGroups].sort((a, b) => a.order - b.order);
-    const validGroups = new Set(groups.map(group => group.id));
-    const ungrouped = this.data.tracks.filter(track => !validGroups.has(track.groupId)).sort((a, b) => a.order - b.order);
-    for (const track of ungrouped) board.append(this.makeTrackRow(track, visibleEvents, totalWidth, unitWidth));
-    const appendGroup = (group, depth) => {
-      board.append(this.makeGroupRow(group, totalWidth, depth));
-      if (group.collapsed) return;
-      const children = groups.filter(candidate => candidate.parentId === group.id);
-      for (const child of children) appendGroup(child, depth + 1);
-      const tracks = this.data.tracks.filter(track => track.groupId === group.id).sort((a, b) => a.order - b.order);
-      for (const track of tracks) board.append(this.makeTrackRow(track, visibleEvents, totalWidth, unitWidth, depth + 1));
+    const appendContainer = (parentId, depth) => {
+      for (const item of timelineContainerItems(this.data, parentId)) {
+        if (item.kind === 'track') {
+          const track = this.data.tracks.find(candidate => candidate.id === item.id);
+          if (track) board.append(this.makeTrackRow(track, visibleEvents, totalWidth, unitWidth, depth));
+          continue;
+        }
+        const group = this.data.trackGroups.find(candidate => candidate.id === item.id);
+        if (!group) continue;
+        board.append(this.makeGroupRow(group, totalWidth, depth));
+        if (!group.collapsed) appendContainer(group.id, depth + 1);
+      }
     };
-    for (const group of groups.filter(group => !group.parentId)) appendGroup(group, 0);
+    appendContainer(null, 0);
 
     scroll.append(board);
     this.stage.append(scroll);
@@ -741,6 +821,51 @@ export class TimelineView {
     return row;
   }
 
+  itemDropZone(row, dragEvent, allowInside) {
+    const rect = row.getBoundingClientRect();
+    const ratio = clamp((dragEvent.clientY - rect.top) / Math.max(1, rect.height), 0, 1);
+    if (allowInside && ratio >= .25 && ratio <= .75) return 'inside';
+    return ratio < .5 ? 'before' : 'after';
+  }
+
+  showItemDropHint(row, zone) {
+    this.clearItemDropHints();
+    row.classList.add(`drop-${zone}`);
+  }
+
+  clearItemDropHints() {
+    for (const row of this.stage.querySelectorAll('.drop-before,.drop-after,.drop-inside')) {
+      row.classList.remove('drop-before', 'drop-after', 'drop-inside');
+    }
+  }
+
+  acceptsItemDrop(dragEvent) {
+    return dragEvent.dataTransfer.types.includes(TRACK_MIME)
+      || dragEvent.dataTransfer.types.includes(GROUP_MIME);
+  }
+
+  applyItemDrop(dragEvent, targetKind, targetId, position) {
+    const groupPayload = dragEvent.dataTransfer.types.includes(GROUP_MIME)
+      ? this.dragPayload || this.readDragPayload(dragEvent, GROUP_MIME)
+      : null;
+    const trackPayload = dragEvent.dataTransfer.types.includes(TRACK_MIME)
+      ? this.dragPayload || this.readDragPayload(dragEvent, TRACK_MIME)
+      : null;
+    const moving = groupPayload?.groupId
+      ? { groupId: groupPayload.groupId }
+      : { trackIds: trackPayload?.trackIds?.length ? trackPayload.trackIds : [trackPayload?.anchorId].filter(Boolean) };
+    const changed = this.transact('調整軌道順序', data => {
+      const reordered = reorderTimelineItemsModel(data, moving, targetKind, targetId, position);
+      if (reordered && position === 'inside' && targetKind === 'group') {
+        const target = data.trackGroups.find(group => group.id === targetId);
+        if (target) target.collapsed = false;
+      }
+    });
+    if (changed && moving.groupId) this.selectedGroupId = moving.groupId;
+    this.dragPayload = null;
+    this.clearItemDropHints();
+  }
+
   makeGroupRow(group, totalWidth, depth = 0) {
     const directTracks = this.data.tracks.filter(track => track.groupId === group.id);
     const allTrackIds = this.groupTrackIds(group.id);
@@ -767,7 +892,7 @@ export class TimelineView {
     };
     label.ondragend = () => {
       this.dragPayload = null;
-      stage?.classList.remove('drop-target');
+      this.clearItemDropHints();
     };
     const collapse = button(group.collapsed ? '›' : '⌄', group.collapsed ? '展開資料夾' : '收合資料夾');
     collapse.className = 'timeline-folder-toggle';
@@ -811,36 +936,21 @@ export class TimelineView {
     stage.append(element('span', '', directTracks.length || childCount
       ? `第 ${depth + 1} 層 · 可放軌道或子資料夾`
       : '把軌道或資料夾拖到這裡'));
-    const acceptDrop = dragEvent => {
-      if (!dragEvent.dataTransfer.types.includes(TRACK_MIME) && !dragEvent.dataTransfer.types.includes(GROUP_MIME)) return false;
+    row.ondragover = dragEvent => {
+      if (!this.acceptsItemDrop(dragEvent)) return;
       dragEvent.preventDefault();
-      stage.classList.add('drop-target');
-      return true;
+      dragEvent.stopPropagation();
+      const zone = this.itemDropZone(row, dragEvent, true);
+      this.showItemDropHint(row, zone);
     };
-    row.ondragover = acceptDrop;
     row.ondragleave = dragEvent => {
-      if (!row.contains(dragEvent.relatedTarget)) stage.classList.remove('drop-target');
+      if (!row.contains(dragEvent.relatedTarget)) this.clearItemDropHints();
     };
     row.ondrop = dragEvent => {
+      if (!this.acceptsItemDrop(dragEvent)) return;
       dragEvent.preventDefault();
-      stage.classList.remove('drop-target');
-      const groupPayload = dragEvent.dataTransfer.types.includes(GROUP_MIME)
-        ? this.dragPayload || this.readDragPayload(dragEvent, GROUP_MIME)
-        : null;
-      if (groupPayload?.groupId) {
-        this.moveGroupInto(groupPayload.groupId, group.id);
-      } else {
-        const payload = this.dragPayload || this.readDragPayload(dragEvent, TRACK_MIME);
-        if (!payload) return;
-        const trackIds = payload.trackIds?.length ? payload.trackIds : [payload.anchorId];
-        this.transact('移入軌道資料夾', data => {
-          const selected = new Set(trackIds);
-          for (const track of data.tracks) if (selected.has(track.id)) track.groupId = group.id;
-          const target = data.trackGroups.find(item => item.id === group.id);
-          if (target) target.collapsed = false;
-        });
-      }
-      this.dragPayload = null;
+      dragEvent.stopPropagation();
+      this.applyItemDrop(dragEvent, 'group', group.id, this.itemDropZone(row, dragEvent, true));
     };
     row.append(label, stage);
     return row;
@@ -862,6 +972,25 @@ export class TimelineView {
     label.ondragstart = dragEvent => {
       if (dragEvent.target.matches('input,select,button')) return dragEvent.preventDefault();
       this.startTrackDrag(dragEvent, track);
+    };
+    label.ondragend = () => {
+      this.dragPayload = null;
+      this.clearItemDropHints();
+    };
+    row.ondragover = dragEvent => {
+      if (!this.acceptsItemDrop(dragEvent)) return;
+      dragEvent.preventDefault();
+      dragEvent.stopPropagation();
+      this.showItemDropHint(row, this.itemDropZone(row, dragEvent, false));
+    };
+    row.ondragleave = dragEvent => {
+      if (!row.contains(dragEvent.relatedTarget)) this.clearItemDropHints();
+    };
+    row.ondrop = dragEvent => {
+      if (!this.acceptsItemDrop(dragEvent)) return;
+      dragEvent.preventDefault();
+      dragEvent.stopPropagation();
+      this.applyItemDrop(dragEvent, 'track', track.id, this.itemDropZone(row, dragEvent, false));
     };
     const head = element('div', 'timeline-track-head');
     const color = input(track.color, 'color');
@@ -936,6 +1065,7 @@ export class TimelineView {
       this.showDropPreview(this.dragPayload || this.readDragPayload(dragEvent, EVENT_MIME), track.id, position, unitWidth);
     };
     lane.ondrop = dragEvent => {
+      if (!dragEvent.dataTransfer.types.includes(EVENT_MIME)) return;
       const payload = this.dragPayload || this.readDragPayload(dragEvent, EVENT_MIME);
       if (!payload) return;
       dragEvent.preventDefault();
